@@ -26,7 +26,7 @@ dist\ComfyUI-EXIF-viewer.exe
 run_viewer.bat
 ```
 
-`run_viewer.bat`은 `.venv`를 우선 사용하고, 드래그앤드롭에 필요한 `tkinterdnd2`가 없으면 `requirements.txt`를 설치한다.
+`run_viewer.bat`은 `.venv`를 우선 사용하고, 드래그앤드롭/이미지 미리보기에 필요한 패키지가 없으면 `requirements.txt`를 설치한다.
 
 특정 파일을 바로 열려면:
 
@@ -64,7 +64,7 @@ build_exe.bat
 ## UI
 
 - Windows DPI scaling을 적용해 150% 배율에서 창과 텍스트 크기를 보정한다.
-- 좌측 드롭 영역에 이미지 파일을 끌어다 놓을 수 있다.
+- 좌측 드롭 영역에 이미지 파일을 끌어다 놓으면 썸네일을 표시한다.
 - 우측 탭에서 Prompt, Negative, Settings, Workflow, Raw를 분리해서 확인한다.
 
 ## 테스트

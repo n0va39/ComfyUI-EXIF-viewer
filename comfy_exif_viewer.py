@@ -7,6 +7,13 @@ import tkinter as tk
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
+try:
+    from PIL import Image, ImageOps, ImageTk
+except ImportError:
+    Image = None
+    ImageOps = None
+    ImageTk = None
+
 from comfy_metadata_reader import (
     MetadataResult,
     extract_sections,
@@ -58,6 +65,9 @@ class MetadataViewer(BaseTk):
         self.platform_var = tk.StringVar(value="Platform: -")
         self.text_widgets: dict[str, tk.Text] = {}
         self.current_result: MetadataResult | None = None
+        self.current_image_path: Path | None = None
+        self.preview_photo: object | None = None
+        self.preview_after_id: str | None = None
 
         self._build_ui()
         self._setup_drag_and_drop()
@@ -115,6 +125,7 @@ class MetadataViewer(BaseTk):
             wraplength=280,
         )
         self.drop_label.grid(row=0, column=0, sticky="nsew", padx=18, pady=18)
+        self.drop_frame.bind("<Configure>", self._schedule_preview_refresh)
 
         ttk.Label(left_panel, textvariable=self.platform_var).grid(
             row=1, column=0, sticky="ew", pady=(8, 0)
@@ -168,7 +179,8 @@ class MetadataViewer(BaseTk):
 
         self.current_result = result
         self.path_var.set(str(result.path))
-        self.drop_label.configure(text=f"{result.path.name}\n\n{result.format_name}")
+        self.current_image_path = result.path
+        self._render_preview(result.path, result.format_name)
         self._render_result(result)
 
     def _render_result(self, result: MetadataResult) -> None:
@@ -252,6 +264,49 @@ class MetadataViewer(BaseTk):
             messagebox.showinfo("Unsupported file", "Use PNG, WEBP, JPG, or JPEG.")
             return
         self.open_path(path)
+
+    def _schedule_preview_refresh(self, _event: object | None = None) -> None:
+        if self.current_image_path is None:
+            return
+        if self.preview_after_id is not None:
+            self.after_cancel(self.preview_after_id)
+        self.preview_after_id = self.after(
+            100, lambda: self._render_preview(self.current_image_path)
+        )
+
+    def _render_preview(self, path: Path, format_name: str | None = None) -> None:
+        self.preview_after_id = None
+        if Image is None or ImageOps is None or ImageTk is None:
+            self.preview_photo = None
+            self.drop_label.configure(
+                image="",
+                text=f"{path.name}\n\nPreview requires Pillow.",
+                compound=tk.NONE,
+            )
+            return
+
+        width = max(self.drop_frame.winfo_width() - 36, 180)
+        height = max(self.drop_frame.winfo_height() - 86, 180)
+
+        try:
+            with Image.open(path) as image:
+                image = ImageOps.exif_transpose(image)
+                image.thumbnail((width, height), Image.Resampling.LANCZOS)
+                photo = ImageTk.PhotoImage(image)
+        except Exception as exc:
+            self.preview_photo = None
+            self.drop_label.configure(
+                image="",
+                text=f"{path.name}\n\nPreview failed:\n{exc}",
+                compound=tk.NONE,
+            )
+            return
+
+        self.preview_photo = photo
+        label = path.name
+        if format_name:
+            label = f"{label}\n{format_name}"
+        self.drop_label.configure(image=photo, text=label, compound=tk.TOP)
 
 
 def main() -> int:
