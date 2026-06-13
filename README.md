@@ -10,6 +10,14 @@ ComfyUI 이미지 메타데이터를 확인하는 간단한 뷰어이다.
 
 ## 실행 방법
 
+EXE 빌드 후 실행:
+
+```bat
+dist\ComfyUI-EXIF-viewer.exe
+```
+
+소스에서 실행:
+
 ```bat
 run_viewer.bat
 ```
@@ -25,6 +33,14 @@ run_viewer.bat "sample\style_1_2026-06-13-151752.webp"
 ```bat
 python comfy_exif_viewer.py --dump "sample\style_1_2026-06-13-151752.webp"
 ```
+
+## EXE 빌드
+
+```bat
+build_exe.bat
+```
+
+빌드 결과는 `dist\ComfyUI-EXIF-viewer.exe`에 생성된다.
 
 ## 지원 형식
 
