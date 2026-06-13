@@ -67,6 +67,16 @@ build_exe.bat
 - 좌측 드롭 영역에 이미지 파일을 끌어다 놓으면 썸네일을 표시한다.
 - 우측 탭에서 Prompt, Negative, Settings, Workflow, Raw를 분리해서 확인한다.
 
+## 워크플로우 프롬프트 추측
+
+A1111/WebUI `parameters`가 없는 ComfyUI 이미지에서만 보조적으로 사용한다.
+
+- 기본값은 OFF이며, 켜기 전에는 워크플로우 추적을 실행하지 않는다.
+- `Auto CLIP`: KSampler의 `positive`/`negative` 입력에서 CLIPTextEncode 노드를 역추적한다.
+- `Manual nodes`: Positive/Negative 노드 ID를 직접 입력한다. 여러 노드는 쉼표, 공백, 세미콜론으로 구분한다.
+- `Concat`: 여러 텍스트 노드를 합칠 때 사용할 구분자이다. `\n` 같은 escape 문자를 사용할 수 있다.
+- 추측 결과와 추적 정보는 `Guess` 탭에 표시된다.
+
 ## 테스트
 
 ```bat

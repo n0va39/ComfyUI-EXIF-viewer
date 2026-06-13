@@ -4,5 +4,4 @@ __pycache__/
 build/
 dist/
 *.spec
-ndg_gui.exe
 sample/

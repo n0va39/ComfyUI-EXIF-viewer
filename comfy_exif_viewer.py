@@ -20,6 +20,7 @@ from comfy_metadata_reader import (
     format_report,
     read_metadata,
 )
+from comfy_workflow_prompts import decode_delimiter, infer_workflow_prompts
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -63,6 +64,11 @@ class MetadataViewer(BaseTk):
         self.path_var = tk.StringVar(value="No file loaded")
         self.status_var = tk.StringVar(value="Open or drop an image file.")
         self.platform_var = tk.StringVar(value="Platform: -")
+        self.infer_enabled_var = tk.BooleanVar(value=False)
+        self.infer_mode_var = tk.StringVar(value="Auto CLIP")
+        self.infer_positive_nodes_var = tk.StringVar(value="")
+        self.infer_negative_nodes_var = tk.StringVar(value="")
+        self.infer_delimiter_var = tk.StringVar(value="\\n")
         self.text_widgets: dict[str, tk.Text] = {}
         self.current_result: MetadataResult | None = None
         self.current_image_path: Path | None = None
@@ -133,6 +139,7 @@ class MetadataViewer(BaseTk):
         ttk.Label(left_panel, textvariable=self.status_var, wraplength=320).grid(
             row=2, column=0, sticky="ew", pady=(4, 0)
         )
+        self._build_inference_controls(left_panel)
 
         right_panel = ttk.Frame(content)
         right_panel.rowconfigure(0, weight=1)
@@ -144,8 +151,49 @@ class MetadataViewer(BaseTk):
         content.add(left_panel, weight=1)
         content.add(right_panel, weight=3)
 
-        for name in ("Summary", "Prompt", "Negative", "Settings", "Workflow", "Raw"):
+        for name in ("Summary", "Prompt", "Negative", "Settings", "Guess", "Workflow", "Raw"):
             self._add_text_tab(name)
+
+    def _build_inference_controls(self, parent: ttk.Frame) -> None:
+        frame = ttk.LabelFrame(parent, text="Workflow prompt guess", padding=8)
+        frame.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        frame.columnconfigure(1, weight=1)
+
+        ttk.Checkbutton(
+            frame,
+            text="Enable",
+            variable=self.infer_enabled_var,
+            command=self.refresh_current_result,
+        ).grid(row=0, column=0, sticky="w")
+
+        mode_box = ttk.Combobox(
+            frame,
+            textvariable=self.infer_mode_var,
+            values=("Auto CLIP", "Manual nodes"),
+            state="readonly",
+            width=14,
+        )
+        mode_box.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        mode_box.bind("<<ComboboxSelected>>", lambda _event: self.refresh_current_result())
+
+        ttk.Label(frame, text="Positive IDs").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Entry(frame, textvariable=self.infer_positive_nodes_var).grid(
+            row=1, column=1, sticky="ew", padx=(8, 0), pady=(6, 0)
+        )
+
+        ttk.Label(frame, text="Negative IDs").grid(row=2, column=0, sticky="w", pady=(4, 0))
+        ttk.Entry(frame, textvariable=self.infer_negative_nodes_var).grid(
+            row=2, column=1, sticky="ew", padx=(8, 0), pady=(4, 0)
+        )
+
+        ttk.Label(frame, text="Concat").grid(row=3, column=0, sticky="w", pady=(4, 0))
+        ttk.Entry(frame, textvariable=self.infer_delimiter_var, width=10).grid(
+            row=3, column=1, sticky="w", padx=(8, 0), pady=(4, 0)
+        )
+
+        ttk.Button(frame, text="Apply", command=self.refresh_current_result).grid(
+            row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0)
+        )
 
     def _add_text_tab(self, name: str) -> None:
         frame = ttk.Frame(self.notebook)
@@ -185,6 +233,16 @@ class MetadataViewer(BaseTk):
 
     def _render_result(self, result: MetadataResult) -> None:
         sections = extract_sections(result)
+        display_prompt = sections.prompt
+        display_negative = sections.negative_prompt
+        guess_report = self._workflow_guess_report(result, sections)
+        guess = getattr(self, "_last_prompt_guess", None)
+        if self.infer_enabled_var.get() and not sections.raw_parameters and guess is not None:
+            if guess.positive:
+                display_prompt = guess.positive
+            if guess.negative:
+                display_negative = guess.negative
+
         self.platform_var.set(f"Platform: {sections.platform}")
         self.status_var.set(f"{result.format_name}, {len(result.entries)} metadata entries")
 
@@ -203,11 +261,50 @@ class MetadataViewer(BaseTk):
             summary.extend(["", "Warnings:", *result.warnings])
 
         self._set_text("Summary", "\n".join(summary))
-        self._set_text("Prompt", sections.prompt)
-        self._set_text("Negative", sections.negative_prompt)
+        self._set_text("Prompt", display_prompt)
+        self._set_text("Negative", display_negative)
         self._set_text("Settings", sections.settings)
+        self._set_text("Guess", guess_report)
         self._set_text("Workflow", sections.workflow)
         self._set_text("Raw", format_report(result))
+
+    def _workflow_guess_report(self, result: MetadataResult, sections: object) -> str:
+        self._last_prompt_guess = None
+        if not self.infer_enabled_var.get():
+            return "Workflow prompt guess is disabled."
+
+        workflow_json = result.first_value("workflow")
+        prompt_json = result.first_value("prompt")
+        if not workflow_json and not prompt_json:
+            return "No ComfyUI workflow/prompt JSON found."
+
+        if getattr(sections, "raw_parameters", ""):
+            return (
+                "Skipped.\n\n"
+                "A1111/WebUI parameters are already stored in the image, so workflow "
+                "prompt guessing was not applied."
+            )
+
+        mode = "manual" if self.infer_mode_var.get() == "Manual nodes" else "auto"
+        delimiter = decode_delimiter(self.infer_delimiter_var.get())
+        guess = infer_workflow_prompts(
+            workflow_json=workflow_json,
+            prompt_json=prompt_json,
+            mode=mode,
+            positive_node_ids=self.infer_positive_nodes_var.get(),
+            negative_node_ids=self.infer_negative_nodes_var.get(),
+            delimiter=delimiter,
+        )
+        self._last_prompt_guess = guess
+
+        lines = [guess.details]
+        if guess.positive:
+            lines.extend(["", "[positive]", guess.positive])
+        if guess.negative:
+            lines.extend(["", "[negative]", guess.negative])
+        if guess.warnings:
+            lines.extend(["", "[warnings]", *guess.warnings])
+        return "\n".join(lines).strip()
 
     def _set_text(self, tab_name: str, value: str) -> None:
         text = self.text_widgets[tab_name]
@@ -238,6 +335,10 @@ class MetadataViewer(BaseTk):
         if not selected:
             return
         Path(selected).write_text(text + "\n", encoding="utf-8")
+
+    def refresh_current_result(self) -> None:
+        if self.current_result is not None:
+            self._render_result(self.current_result)
 
     def _setup_drag_and_drop(self) -> None:
         if DND_FILES is None or not hasattr(self, "drop_target_register"):
