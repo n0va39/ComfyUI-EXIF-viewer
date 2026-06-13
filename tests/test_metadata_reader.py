@@ -6,7 +6,7 @@ import unittest
 import zlib
 from pathlib import Path
 
-from comfy_metadata_reader import extract_sections, read_metadata
+from comfy_metadata_reader import extract_civitai_resources, extract_sections, read_metadata
 
 
 def png_chunk(kind: bytes, payload: bytes) -> bytes:
@@ -119,6 +119,39 @@ class MetadataReaderTests(unittest.TestCase):
         self.assertEqual(sections.prompt, "cat")
         self.assertEqual(sections.negative_prompt, "dog")
         self.assertIn('"steps": 28', sections.settings)
+
+    def test_extracts_confirmed_civitai_resources(self) -> None:
+        payload = (
+            "cat\n"
+            "Steps: 20, Civitai resources: "
+            '[{"modelName":"sample lora","versionName":"v1",'
+            '"weight":0.75,"air":"urn:air:sdxl:lora:civitai:123@456"}]'
+        )
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "sample.png"
+            path.write_bytes(make_png_with_text("parameters", payload))
+
+            result = read_metadata(path)
+
+        resources = extract_civitai_resources(result)
+        self.assertEqual(len(resources), 1)
+        self.assertEqual(resources[0].name, "sample lora")
+        self.assertEqual(resources[0].version, "v1")
+        self.assertEqual(resources[0].weight, "0.75")
+        self.assertEqual(
+            resources[0].url,
+            "https://civitai.red/models/123?modelVersionId=456",
+        )
+
+    def test_ignores_unconfirmed_civitai_text(self) -> None:
+        payload = "cat, <lora:sample:1>, hash: abc123, civitai"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "sample.png"
+            path.write_bytes(make_png_with_text("parameters", payload))
+
+            result = read_metadata(path)
+
+        self.assertEqual(extract_civitai_resources(result), [])
 
 
 if __name__ == "__main__":

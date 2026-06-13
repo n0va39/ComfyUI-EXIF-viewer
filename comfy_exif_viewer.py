@@ -4,6 +4,8 @@ import argparse
 import ctypes
 import os
 import tkinter as tk
+import tkinter.font as tkfont
+import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 
@@ -16,6 +18,7 @@ except ImportError:
 
 from comfy_metadata_reader import (
     MetadataResult,
+    extract_civitai_resources,
     extract_sections,
     format_report,
     read_metadata,
@@ -58,9 +61,10 @@ class MetadataViewer(BaseTk):
     def __init__(self, initial_path: str | None = None) -> None:
         super().__init__()
         self.title("ComfyUI EXIF Viewer")
-        self.geometry("1120x780")
-        self.minsize(860, 560)
+        self.geometry("1240x840")
+        self.minsize(980, 640)
         self._configure_dpi_scaling()
+        self._configure_fonts()
 
         self.path_var = tk.StringVar(value="No file loaded")
         self.status_var = tk.StringVar(value="Open or drop an image file.")
@@ -90,8 +94,53 @@ class MetadataViewer(BaseTk):
         except tk.TclError:
             pass
 
+    def _configure_fonts(self) -> None:
+        self.ui_font_family = self._choose_font_family(
+            ("Segoe UI Variable Text", "Segoe UI Variable", "Segoe UI", "Malgun Gothic")
+        )
+        self.mono_font_family = self._choose_font_family(
+            ("Cascadia Mono", "Cascadia Code", "Consolas", "Courier New")
+        )
+
+        fonts = {
+            "TkDefaultFont": (self.ui_font_family, 10),
+            "TkTextFont": (self.ui_font_family, 10),
+            "TkMenuFont": (self.ui_font_family, 10),
+            "TkHeadingFont": (self.ui_font_family, 10, "bold"),
+            "TkCaptionFont": (self.ui_font_family, 9),
+            "TkSmallCaptionFont": (self.ui_font_family, 9),
+            "TkIconFont": (self.ui_font_family, 10),
+            "TkTooltipFont": (self.ui_font_family, 9),
+        }
+        for font_name, config in fonts.items():
+            try:
+                tkfont.nametofont(font_name).configure(family=config[0], size=config[1])
+                if len(config) > 2:
+                    tkfont.nametofont(font_name).configure(weight=config[2])
+            except tk.TclError:
+                pass
+
+        style = ttk.Style(self)
+        style.configure(".", font=(self.ui_font_family, 10))
+        style.configure("TButton", font=(self.ui_font_family, 10), padding=(10, 7))
+        style.configure("TCheckbutton", font=(self.ui_font_family, 10), padding=(2, 4))
+        style.configure("TEntry", font=(self.ui_font_family, 10), padding=(6, 4))
+        style.configure("TCombobox", font=(self.ui_font_family, 10), padding=(6, 4))
+        style.configure("TLabel", font=(self.ui_font_family, 10))
+        style.configure("TLabelframe.Label", font=(self.ui_font_family, 10, "bold"))
+        style.configure("TNotebook.Tab", font=(self.ui_font_family, 10), padding=(14, 8))
+        self.option_add("*TCombobox*Listbox.font", (self.ui_font_family, 10))
+
+    def _choose_font_family(self, candidates: tuple[str, ...]) -> str:
+        available = {name.lower(): name for name in tkfont.families(self)}
+        for candidate in candidates:
+            found = available.get(candidate.lower())
+            if found:
+                return found
+        return candidates[-1]
+
     def _build_ui(self) -> None:
-        toolbar = ttk.Frame(self, padding=(8, 8, 8, 4))
+        toolbar = ttk.Frame(self, padding=(10, 10, 10, 6))
         toolbar.pack(fill=tk.X)
 
         ttk.Button(toolbar, text="Open", command=self.open_dialog).pack(side=tk.LEFT)
@@ -106,9 +155,9 @@ class MetadataViewer(BaseTk):
         path_label.pack(side=tk.LEFT, fill=tk.X, expand=True, padx=(10, 0))
 
         content = ttk.PanedWindow(self, orient=tk.HORIZONTAL)
-        content.pack(fill=tk.BOTH, expand=True, padx=8, pady=(0, 8))
+        content.pack(fill=tk.BOTH, expand=True, padx=10, pady=(0, 10))
 
-        left_panel = ttk.Frame(content, padding=8)
+        left_panel = ttk.Frame(content, padding=10, width=360)
         left_panel.columnconfigure(0, weight=1)
         left_panel.rowconfigure(0, weight=1)
 
@@ -129,6 +178,7 @@ class MetadataViewer(BaseTk):
             text="Drop image here\nor click Open",
             bg="#f7e9e9",
             fg="#333333",
+            font=(self.ui_font_family, 12, "bold"),
             justify=tk.CENTER,
             wraplength=280,
         )
@@ -136,10 +186,10 @@ class MetadataViewer(BaseTk):
         self.drop_frame.bind("<Configure>", self._schedule_preview_refresh)
 
         ttk.Label(left_panel, textvariable=self.platform_var).grid(
-            row=1, column=0, sticky="ew", pady=(8, 0)
+            row=1, column=0, sticky="ew", pady=(10, 0)
         )
-        ttk.Label(left_panel, textvariable=self.status_var, wraplength=320).grid(
-            row=2, column=0, sticky="ew", pady=(4, 0)
+        ttk.Label(left_panel, textvariable=self.status_var, wraplength=340).grid(
+            row=2, column=0, sticky="ew", pady=(6, 0)
         )
         self._build_inference_controls(left_panel)
 
@@ -153,12 +203,21 @@ class MetadataViewer(BaseTk):
         content.add(left_panel, weight=1)
         content.add(right_panel, weight=3)
 
-        for name in ("Summary", "Prompt", "Negative", "Settings", "Guess", "Workflow", "Raw"):
+        for name in (
+            "Summary",
+            "Prompt",
+            "Negative",
+            "Settings",
+            "Resources",
+            "Guess",
+            "Workflow",
+            "Raw",
+        ):
             self._add_text_tab(name)
 
     def _build_inference_controls(self, parent: ttk.Frame) -> None:
-        frame = ttk.LabelFrame(parent, text="Workflow prompt guess", padding=8)
-        frame.grid(row=3, column=0, sticky="ew", pady=(10, 0))
+        frame = ttk.LabelFrame(parent, text="Workflow prompt guess", padding=10)
+        frame.grid(row=3, column=0, sticky="ew", pady=(12, 0))
         frame.columnconfigure(1, weight=1)
 
         ttk.Checkbutton(
@@ -166,43 +225,43 @@ class MetadataViewer(BaseTk):
             text="Enable",
             variable=self.infer_enabled_var,
             command=self.refresh_current_result,
-        ).grid(row=0, column=0, sticky="w")
+        ).grid(row=0, column=0, sticky="w", pady=(0, 2))
 
         mode_box = ttk.Combobox(
             frame,
             textvariable=self.infer_mode_var,
             values=("Auto CLIP", "Manual nodes"),
             state="readonly",
-            width=14,
+            width=16,
         )
-        mode_box.grid(row=0, column=1, sticky="ew", padx=(8, 0))
+        mode_box.grid(row=0, column=1, sticky="ew", padx=(10, 0), pady=(0, 2))
         mode_box.bind("<<ComboboxSelected>>", lambda _event: self.refresh_current_result())
 
-        ttk.Label(frame, text="Positive IDs").grid(row=1, column=0, sticky="w", pady=(6, 0))
+        ttk.Label(frame, text="Positive IDs").grid(row=1, column=0, sticky="w", pady=(8, 0))
         ttk.Entry(frame, textvariable=self.infer_positive_nodes_var).grid(
-            row=1, column=1, sticky="ew", padx=(8, 0), pady=(6, 0)
+            row=1, column=1, sticky="ew", padx=(10, 0), pady=(8, 0)
         )
 
-        ttk.Label(frame, text="Negative IDs").grid(row=2, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(frame, text="Negative IDs").grid(row=2, column=0, sticky="w", pady=(6, 0))
         ttk.Entry(frame, textvariable=self.infer_negative_nodes_var).grid(
-            row=2, column=1, sticky="ew", padx=(8, 0), pady=(4, 0)
+            row=2, column=1, sticky="ew", padx=(10, 0), pady=(6, 0)
         )
 
-        ttk.Label(frame, text="Concat").grid(row=3, column=0, sticky="w", pady=(4, 0))
+        ttk.Label(frame, text="Concat").grid(row=3, column=0, sticky="w", pady=(6, 0))
         ttk.Entry(frame, textvariable=self.infer_delimiter_var, width=10).grid(
-            row=3, column=1, sticky="w", padx=(8, 0), pady=(4, 0)
+            row=3, column=1, sticky="w", padx=(10, 0), pady=(6, 0)
         )
 
         ttk.Button(frame, text="Apply", command=self.refresh_current_result).grid(
-            row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0)
+            row=4, column=0, columnspan=2, sticky="ew", pady=(10, 0)
         )
 
-        ttk.Label(frame, text="Node ID").grid(row=5, column=0, sticky="w", pady=(8, 0))
+        ttk.Label(frame, text="Node ID").grid(row=5, column=0, sticky="w", pady=(10, 0))
         ttk.Entry(frame, textvariable=self.node_lookup_var).grid(
-            row=5, column=1, sticky="ew", padx=(8, 0), pady=(8, 0)
+            row=5, column=1, sticky="ew", padx=(10, 0), pady=(10, 0)
         )
         ttk.Button(frame, text="Lookup Node", command=self.lookup_node).grid(
-            row=6, column=0, columnspan=2, sticky="ew", pady=(6, 0)
+            row=6, column=0, columnspan=2, sticky="ew", pady=(8, 0)
         )
 
     def _add_text_tab(self, name: str) -> None:
@@ -210,7 +269,19 @@ class MetadataViewer(BaseTk):
         frame.rowconfigure(0, weight=1)
         frame.columnconfigure(0, weight=1)
 
-        text = tk.Text(frame, wrap=tk.WORD, undo=False)
+        text = tk.Text(
+            frame,
+            wrap=tk.WORD,
+            undo=False,
+            font=(self.mono_font_family, 10),
+            bg="#fbfbfb",
+            fg="#1f2933",
+            insertbackground="#1f2933",
+            padx=12,
+            pady=12,
+            spacing1=3,
+            spacing3=5,
+        )
         text.grid(row=0, column=0, sticky="nsew")
         text.configure(state=tk.DISABLED)
 
@@ -274,6 +345,7 @@ class MetadataViewer(BaseTk):
         self._set_text("Prompt", display_prompt)
         self._set_text("Negative", display_negative)
         self._set_text("Settings", sections.settings)
+        self._set_resources(result)
         self._set_text("Guess", guess_report)
         self._set_text("Workflow", sections.workflow)
         self._set_text("Raw", format_report(result))
@@ -321,6 +393,45 @@ class MetadataViewer(BaseTk):
         text.configure(state=tk.NORMAL)
         text.delete("1.0", tk.END)
         text.insert("1.0", value or "")
+        text.configure(state=tk.DISABLED)
+
+    def _set_resources(self, result: MetadataResult) -> None:
+        text = self.text_widgets["Resources"]
+        text.configure(state=tk.NORMAL)
+        text.delete("1.0", tk.END)
+        text.tag_configure("link", foreground="#0563c1", underline=True)
+        text.tag_bind("link", "<Enter>", lambda _event: text.configure(cursor="hand2"))
+        text.tag_bind("link", "<Leave>", lambda _event: text.configure(cursor=""))
+
+        resources = extract_civitai_resources(result)
+        if not resources:
+            text.insert(
+                "1.0",
+                "No confirmed Civitai resources found.\n\n"
+                "This tab only uses explicitly stored Civitai resources metadata.",
+            )
+            text.configure(state=tk.DISABLED)
+            return
+
+        text.insert(tk.END, "Confirmed Civitai resources\n\n")
+        for index, resource in enumerate(resources, start=1):
+            text.insert(tk.END, f"{index}. ")
+            label = resource.name
+            if resource.version:
+                label = f"{label} - {resource.version}"
+            text.insert(tk.END, label, ("link", f"resource_{index}"))
+            text.tag_bind(
+                f"resource_{index}",
+                "<Button-1>",
+                lambda _event, url=resource.url: webbrowser.open(url),
+            )
+
+            details = []
+            if resource.weight:
+                details.append(f"weight: {resource.weight}")
+            details.append(f"air: {resource.air}")
+            text.insert(tk.END, "\n   " + "\n   ".join(details) + "\n")
+
         text.configure(state=tk.DISABLED)
 
     def _current_text_widget(self) -> tk.Text:

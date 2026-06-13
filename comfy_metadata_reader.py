@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import re
 import struct
 import zlib
 from dataclasses import dataclass
@@ -83,6 +84,15 @@ class MetadataSections:
     settings: str
     workflow: str
     raw_parameters: str
+
+
+@dataclass(frozen=True)
+class CivitaiResource:
+    name: str
+    version: str
+    weight: str
+    air: str
+    url: str
 
 
 def read_metadata(path: str | Path) -> MetadataResult:
@@ -643,6 +653,67 @@ def extract_sections(result: MetadataResult) -> MetadataSections:
         settings=pretty_value(settings),
         workflow=pretty_value(workflow),
         raw_parameters=parameters,
+    )
+
+
+def extract_civitai_resources(result: MetadataResult) -> list[CivitaiResource]:
+    resources: list[CivitaiResource] = []
+    seen: set[tuple[str, str, str]] = set()
+
+    for entry in result.entries:
+        for item in _iter_civitai_resource_items(entry.value):
+            resource = _parse_civitai_resource(item)
+            if resource is None:
+                continue
+            marker = (resource.name, resource.version, resource.url)
+            if marker not in seen:
+                resources.append(resource)
+                seen.add(marker)
+
+    return resources
+
+
+def _iter_civitai_resource_items(value: str) -> list[dict[str, Any]]:
+    marker = "Civitai resources:"
+    marker_index = value.find(marker)
+    if marker_index < 0:
+        return []
+
+    start = value.find("[", marker_index + len(marker))
+    if start < 0:
+        return []
+
+    decoder = json.JSONDecoder()
+    try:
+        parsed, _end = decoder.raw_decode(value[start:])
+    except json.JSONDecodeError:
+        return []
+
+    if not isinstance(parsed, list):
+        return []
+    return [item for item in parsed if isinstance(item, dict)]
+
+
+def _parse_civitai_resource(item: dict[str, Any]) -> CivitaiResource | None:
+    air = str(item.get("air") or "").strip()
+    match = re.search(r":civitai:(\d+)@(\d+)$", air)
+    if not match:
+        return None
+
+    model_id, version_id = match.groups()
+    name = str(item.get("modelName") or "").strip()
+    version = str(item.get("versionName") or "").strip()
+    weight_value = item.get("weight")
+    weight = "" if weight_value is None else str(weight_value)
+    if not name:
+        name = f"Civitai model {model_id}"
+
+    return CivitaiResource(
+        name=name,
+        version=version,
+        weight=weight,
+        air=air,
+        url=f"https://civitai.red/models/{model_id}?modelVersionId={version_id}",
     )
 
 
