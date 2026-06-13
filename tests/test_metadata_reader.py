@@ -6,7 +6,7 @@ import unittest
 import zlib
 from pathlib import Path
 
-from comfy_metadata_reader import read_metadata
+from comfy_metadata_reader import extract_sections, read_metadata
 
 
 def png_chunk(kind: bytes, payload: bytes) -> bytes:
@@ -99,6 +99,26 @@ class MetadataReaderTests(unittest.TestCase):
         self.assertEqual(result.first_value("parameters"), comment)
         self.assertEqual(result.first_value("workflow"), '{"nodes":[]}')
         self.assertEqual(result.first_value("prompt"), '{"1":{"inputs":{}}}')
+
+        sections = extract_sections(result)
+        self.assertEqual(sections.platform, "A1111/WebUI compatible")
+        self.assertEqual(sections.prompt, "cat")
+        self.assertEqual(sections.negative_prompt, "dog")
+        self.assertIn("Steps: 20", sections.settings)
+
+    def test_reads_novelai_comment_json(self) -> None:
+        payload = '{"prompt":"cat","uc":"dog","steps":28,"sampler":"k_euler"}'
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "sample.png"
+            path.write_bytes(make_png_with_text("Comment", payload))
+
+            result = read_metadata(path)
+
+        sections = extract_sections(result)
+        self.assertEqual(sections.platform, "NovelAI")
+        self.assertEqual(sections.prompt, "cat")
+        self.assertEqual(sections.negative_prompt, "dog")
+        self.assertIn('"steps": 28', sections.settings)
 
 
 if __name__ == "__main__":

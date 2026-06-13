@@ -13,6 +13,15 @@ PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 JPEG_SIGNATURE = b"\xff\xd8"
 
 COMFY_KEYS = {"parameters", "prompt", "workflow"}
+KNOWN_TEXT_KEYS = {
+    "comment",
+    "description",
+    "imagedescription",
+    "parameters",
+    "prompt",
+    "usercomment",
+    "workflow",
+}
 
 EXIF_TAG_NAMES = {
     0x010E: "ImageDescription",
@@ -66,6 +75,16 @@ class MetadataResult:
         return ""
 
 
+@dataclass(frozen=True)
+class MetadataSections:
+    platform: str
+    prompt: str
+    negative_prompt: str
+    settings: str
+    workflow: str
+    raw_parameters: str
+
+
 def read_metadata(path: str | Path) -> MetadataResult:
     image_path = Path(path)
     data = image_path.read_bytes()
@@ -85,11 +104,11 @@ def read_metadata(path: str | Path) -> MetadataResult:
         format_name = "UNKNOWN"
         warnings.append("Unsupported or unknown image signature.")
 
-    entries = _with_comfy_aliases(entries)
+    entries = _with_platform_aliases(entries)
     return MetadataResult(image_path, format_name, entries, warnings)
 
 
-def _with_comfy_aliases(entries: list[MetadataEntry]) -> list[MetadataEntry]:
+def _with_platform_aliases(entries: list[MetadataEntry]) -> list[MetadataEntry]:
     result = list(entries)
     seen = {(entry.source, entry.key, entry.value) for entry in result}
 
@@ -100,13 +119,47 @@ def _with_comfy_aliases(entries: list[MetadataEntry]) -> list[MetadataEntry]:
             seen.add(marker)
 
     for entry in entries:
+        lower_key = entry.key.lower()
         if entry.key == "UserComment":
-            add("Comfy", "parameters", entry.value)
+            add("Generic", "parameters", entry.value)
 
         prefix = _split_known_prefix(entry.value)
         if prefix is not None:
             key, value = prefix
             add("Comfy", key, value)
+
+        if lower_key == "parameters":
+            add("A1111", "parameters", entry.value)
+        elif lower_key == "workflow":
+            add("Comfy", "workflow", entry.value)
+        elif lower_key == "prompt":
+            add("Comfy", "prompt", entry.value)
+        elif lower_key in {"comment", "usercomment"}:
+            add("Generic", "comment", entry.value)
+
+        json_data = _parse_json_object(entry.value)
+        if isinstance(json_data, dict):
+            if "uc" in json_data and "prompt" in json_data:
+                add("NovelAI", "prompt", _stringify_json_field(json_data.get("prompt")))
+                add("NovelAI", "negative_prompt", _stringify_json_field(json_data.get("uc")))
+                rest = {
+                    key: value
+                    for key, value in json_data.items()
+                    if key not in {"prompt", "uc", "negative_prompt"}
+                }
+                if rest:
+                    add("NovelAI", "settings", json.dumps(rest, indent=2, ensure_ascii=False))
+            elif "negative_prompt" in json_data and "prompt" in json_data:
+                add("Generic", "prompt", _stringify_json_field(json_data.get("prompt")))
+                add(
+                    "Generic",
+                    "negative_prompt",
+                    _stringify_json_field(json_data.get("negative_prompt")),
+                )
+            elif lower_key in KNOWN_TEXT_KEYS:
+                for key in ("prompt", "negative_prompt", "workflow", "parameters"):
+                    if key in json_data:
+                        add("Generic", key, _stringify_json_field(json_data[key]))
 
     return result
 
@@ -119,6 +172,24 @@ def _split_known_prefix(value: str) -> tuple[str, str] | None:
     if key in COMFY_KEYS:
         return key, tail.strip()
     return None
+
+
+def _parse_json_object(value: str) -> Any:
+    stripped = value.strip()
+    if not stripped or stripped[0] not in "{[":
+        return None
+    try:
+        return json.loads(stripped)
+    except json.JSONDecodeError:
+        return None
+
+
+def _stringify_json_field(value: Any) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, indent=2, ensure_ascii=False)
 
 
 def _read_png_entries(data: bytes, warnings: list[str]) -> list[MetadataEntry]:
@@ -525,16 +596,82 @@ def split_a1111_parameters(parameters: str) -> dict[str, str]:
     }
 
 
+def extract_sections(result: MetadataResult) -> MetadataSections:
+    parameters = result.first_value("parameters")
+    workflow = result.first_value("workflow")
+    prompt = ""
+    negative_prompt = ""
+    settings = ""
+    platform = "Unknown"
+
+    if workflow or result.first_value("prompt"):
+        platform = "ComfyUI"
+
+    if parameters:
+        split_params = split_a1111_parameters(parameters)
+        prompt = split_params["prompt"]
+        negative_prompt = split_params["negative_prompt"]
+        settings = split_params["settings"]
+        if settings or negative_prompt:
+            platform = "A1111/WebUI compatible"
+
+    novel_prompt = _first_value_from_source(result, "NovelAI", "prompt")
+    novel_negative = _first_value_from_source(result, "NovelAI", "negative_prompt")
+    novel_settings = _first_value_from_source(result, "NovelAI", "settings")
+    if novel_prompt or novel_negative:
+        platform = "NovelAI"
+        prompt = novel_prompt or prompt
+        negative_prompt = novel_negative or negative_prompt
+        settings = novel_settings or settings
+
+    generic_prompt = _first_value_from_source(result, "Generic", "prompt")
+    generic_negative = _first_value_from_source(result, "Generic", "negative_prompt")
+    if not prompt and generic_prompt:
+        prompt = generic_prompt
+    if not negative_prompt and generic_negative:
+        negative_prompt = generic_negative
+
+    if not prompt:
+        prompt = result.first_value("prompt")
+    if not settings:
+        settings = result.first_value("settings")
+
+    return MetadataSections(
+        platform=platform,
+        prompt=pretty_value(prompt),
+        negative_prompt=pretty_value(negative_prompt),
+        settings=pretty_value(settings),
+        workflow=pretty_value(workflow),
+        raw_parameters=parameters,
+    )
+
+
+def _first_value_from_source(result: MetadataResult, source: str, key: str) -> str:
+    source_lower = source.lower()
+    key_lower = key.lower()
+    for entry in result.entries:
+        if entry.source.lower() == source_lower and entry.key.lower() == key_lower:
+            return entry.value
+    return ""
+
+
 def format_report(result: MetadataResult) -> str:
+    sections = extract_sections(result)
     lines = [
         f"File: {result.path}",
         f"Format: {result.format_name}",
+        f"Platform: {sections.platform}",
         f"Metadata entries: {len(result.entries)}",
         "",
     ]
 
-    for key in ("parameters", "prompt", "workflow"):
-        value = result.first_value(key)
+    for key, value in (
+        ("prompt", sections.prompt),
+        ("negative_prompt", sections.negative_prompt),
+        ("settings", sections.settings),
+        ("workflow", sections.workflow),
+        ("parameters", sections.raw_parameters),
+    ):
         if value:
             lines.extend([f"[{key}]", pretty_value(value), ""])
 

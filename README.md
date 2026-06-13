@@ -2,6 +2,10 @@
 
 ComfyUI 이미지 메타데이터를 확인하는 간단한 뷰어이다.
 
+UI 흐름은 `DCP-arca/NAI-Tag-Viewer`의 이미지 드롭 영역과 프롬프트/옵션 분리 표시를 참고했다. 참고용 포크:
+
+https://github.com/n0va39/NAI-Tag-Viewer
+
 ## 원인
 
 기존 `ndg_gui.exe`의 원본인 `DCP-arca/NAI-Tag-Viewer`는 README 기준 PNG 중심 뷰어이며, `NaiDictGetter.py`도 PIL `img.info`와 stealth PNG 정보를 주로 확인한다.
@@ -19,8 +23,11 @@ dist\ComfyUI-EXIF-viewer.exe
 소스에서 실행:
 
 ```bat
+python -m pip install -r requirements.txt
 run_viewer.bat
 ```
+
+드래그앤드롭은 `tkinterdnd2`가 설치된 환경 또는 빌드된 EXE에서 동작한다.
 
 특정 파일을 바로 열려면:
 
@@ -47,6 +54,19 @@ build_exe.bat
 - PNG: `tEXt`, `zTXt`, `iTXt`
 - WEBP: RIFF `EXIF`, `XMP`
 - JPEG: APP1 EXIF, XMP, Comment
+
+## 지원 플랫폼
+
+- ComfyUI: `parameters`, `prompt`, `workflow`
+- A1111/WebUI 호환: `parameters`, EXIF `UserComment`
+- NovelAI: PNG `Comment` JSON의 `prompt`, `uc`
+- 기타: EXIF/XMP/Comment 원본 표시
+
+## UI
+
+- Windows DPI scaling을 적용해 150% 배율에서 창과 텍스트 크기를 보정한다.
+- 좌측 드롭 영역에 이미지 파일을 끌어다 놓을 수 있다.
+- 우측 탭에서 Prompt, Negative, Settings, Workflow, Raw를 분리해서 확인한다.
 
 ## 테스트
 
