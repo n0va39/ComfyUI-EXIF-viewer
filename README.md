@@ -10,7 +10,7 @@ https://github.com/DCP-arca/NAI-Tag-Viewer
 
 기존 `ndg_gui.exe`의 원본인 `DCP-arca/NAI-Tag-Viewer`는 README 기준 PNG 중심 뷰어이며, `NaiDictGetter.py`도 PIL `img.info`와 stealth PNG 정보를 주로 확인한다.
 
-`alexopus/ComfyUI-Image-Saver`는 PNG에는 `parameters`, `prompt`, `workflow`를 PNG 텍스트 청크로 저장하지만, JPEG/WEBP에는 A1111/Civitai 형식 문자열을 EXIF `UserComment`에 저장한다. 따라서 WEBP의 RIFF `EXIF` 청크와 TIFF/EXIF `UserComment`를 직접 읽지 않으면 Civitai에서는 보이는 정보가 로컬 뷰어에서는 보이지 않을 수 있다.
+[`alexopus/ComfyUI-Image-Saver`](https://github.com/alexopus/ComfyUI-Image-Saver)는 PNG에는 `parameters`, `prompt`, `workflow`를 PNG 텍스트 청크로 저장하지만, JPEG/WEBP에는 A1111/Civitai 형식 문자열을 EXIF `UserComment`에 저장한다. 따라서 WEBP의 RIFF `EXIF` 청크와 TIFF/EXIF `UserComment`를 직접 읽지 않으면 Civitai에서는 보이는 정보가 로컬 뷰어에서는 보이지 않을 수 있다.
 
 ## 실행 방법
 
@@ -67,7 +67,7 @@ build_exe.bat
 - 좌측 드롭 영역에 이미지 파일을 끌어다 놓으면 썸네일을 표시한다.
 - 우측 탭에서 Prompt, Negative, Settings, Resources, Workflow, Raw를 분리해서 확인한다.
 - `Resources` 탭은 메타데이터에 확정 저장된 `Civitai resources`만 표시한다.
-- Civitai 리소스 이름을 클릭하면 `civitai.red`의 해당 모델 버전 링크를 연다.
+- [`alexopus/ComfyUI-Image-Saver`](https://github.com/alexopus/ComfyUI-Image-Saver) 커스텀 노드 방식으로 저장된 리소스는 이름을 클릭해 `civitai.red`의 해당 모델 버전으로 연결할 수 있다.
 
 ## 사용 예시
 
@@ -81,7 +81,7 @@ ComfyUI 워크플로우만 있고 A1111/WebUI `parameters`가 없을 때 `Workfl
 
 ![ComfyUI Image Saver Civitai 리소스](image/image%20saver.png)
 
-`alexopus/ComfyUI-Image-Saver`가 저장한 `Civitai resources` 메타데이터가 있으면 `Resources` 탭에서 사용된 리소스 이름, 버전, 가중치, AIR 값을 확인할 수 있다. 리소스 이름은 `civitai.red` 링크로 연결된다.
+[`alexopus/ComfyUI-Image-Saver`](https://github.com/alexopus/ComfyUI-Image-Saver)가 저장한 `Civitai resources` 메타데이터가 있으면 `Resources` 탭에서 사용된 리소스 이름, 버전, 가중치, AIR 값을 확인할 수 있다. 리소스 이름은 `civitai.red` 링크로 연결된다.
 
 ## 워크플로우 프롬프트 추측
 
