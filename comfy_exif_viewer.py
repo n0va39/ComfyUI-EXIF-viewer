@@ -21,6 +21,7 @@ from comfy_metadata_reader import (
     read_metadata,
 )
 from comfy_workflow_prompts import decode_delimiter, infer_workflow_prompts
+from comfy_workflow_prompts import describe_workflow_node
 
 try:
     from tkinterdnd2 import DND_FILES, TkinterDnD
@@ -69,6 +70,7 @@ class MetadataViewer(BaseTk):
         self.infer_positive_nodes_var = tk.StringVar(value="")
         self.infer_negative_nodes_var = tk.StringVar(value="")
         self.infer_delimiter_var = tk.StringVar(value="\\n")
+        self.node_lookup_var = tk.StringVar(value="")
         self.text_widgets: dict[str, tk.Text] = {}
         self.current_result: MetadataResult | None = None
         self.current_image_path: Path | None = None
@@ -193,6 +195,14 @@ class MetadataViewer(BaseTk):
 
         ttk.Button(frame, text="Apply", command=self.refresh_current_result).grid(
             row=4, column=0, columnspan=2, sticky="ew", pady=(8, 0)
+        )
+
+        ttk.Label(frame, text="Node ID").grid(row=5, column=0, sticky="w", pady=(8, 0))
+        ttk.Entry(frame, textvariable=self.node_lookup_var).grid(
+            row=5, column=1, sticky="ew", padx=(8, 0), pady=(8, 0)
+        )
+        ttk.Button(frame, text="Lookup Node", command=self.lookup_node).grid(
+            row=6, column=0, columnspan=2, sticky="ew", pady=(6, 0)
         )
 
     def _add_text_tab(self, name: str) -> None:
@@ -340,6 +350,19 @@ class MetadataViewer(BaseTk):
         if self.current_result is not None:
             self._render_result(self.current_result)
 
+    def lookup_node(self) -> None:
+        if self.current_result is None:
+            return
+        workflow_json = self.current_result.first_value("workflow")
+        prompt_json = self.current_result.first_value("prompt")
+        report = describe_workflow_node(
+            workflow_json,
+            prompt_json,
+            self.node_lookup_var.get(),
+        )
+        self._set_text("Guess", report)
+        self.notebook.select(self.text_widgets["Guess"].master)
+
     def _setup_drag_and_drop(self) -> None:
         if DND_FILES is None or not hasattr(self, "drop_target_register"):
             self.status_var.set(
@@ -423,6 +446,7 @@ def main() -> int:
     if args.dump:
         if not args.image:
             parser.error("--dump requires an image path")
+        _force_utf8_stdout()
         print(format_report(read_metadata(args.image)))
         return 0
 
@@ -430,6 +454,15 @@ def main() -> int:
     app = MetadataViewer(args.image)
     app.mainloop()
     return 0
+
+
+def _force_utf8_stdout() -> None:
+    try:
+        import sys
+
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":

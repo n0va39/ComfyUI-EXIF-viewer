@@ -3,7 +3,8 @@ from __future__ import annotations
 import json
 import unittest
 
-from comfy_workflow_prompts import decode_delimiter, infer_workflow_prompts
+from comfy_workflow_prompts import decode_delimiter, describe_workflow_node
+from comfy_workflow_prompts import infer_workflow_prompts
 
 
 class WorkflowPromptInferenceTests(unittest.TestCase):
@@ -62,6 +63,52 @@ class WorkflowPromptInferenceTests(unittest.TestCase):
         self.assertEqual(guess.positive, "cat\nbest quality")
         self.assertEqual(guess.negative, "bad hands")
 
+    def test_auto_clip_trace_uses_first_sampler_only(self) -> None:
+        prompt = {
+            "6": {"class_type": "CLIPTextEncode", "inputs": {"text": "first cat"}},
+            "7": {"class_type": "CLIPTextEncode", "inputs": {"text": "first bad"}},
+            "8": {
+                "class_type": "KSampler",
+                "inputs": {"positive": ["6", 0], "negative": ["7", 0]},
+            },
+            "9": {"class_type": "VAEDecode", "inputs": {"samples": ["8", 0]}},
+            "16": {"class_type": "CLIPTextEncode", "inputs": {"text": "second cat"}},
+            "17": {"class_type": "CLIPTextEncode", "inputs": {"text": "second bad"}},
+            "18": {
+                "class_type": "KSampler",
+                "inputs": {
+                    "samples": ["8", 0],
+                    "positive": ["16", 0],
+                    "negative": ["17", 0],
+                },
+            },
+        }
+
+        guess = infer_workflow_prompts("", json.dumps(prompt), "auto")
+
+        self.assertEqual(guess.positive, "first cat")
+        self.assertEqual(guess.negative, "first bad")
+        self.assertIn("Sampler node: 8", guess.details)
+
+    def test_auto_clip_trace_respects_context_output_index(self) -> None:
+        prompt = {
+            "6": {"class_type": "CLIPTextEncode", "inputs": {"text": "cat"}},
+            "7": {"class_type": "CLIPTextEncode", "inputs": {"text": "bad"}},
+            "20": {
+                "class_type": "Context Big (rgthree)",
+                "inputs": {"positive": ["6", 0], "negative": ["7", 0]},
+            },
+            "8": {
+                "class_type": "KSampler",
+                "inputs": {"positive": ["20", 4], "negative": ["20", 5]},
+            },
+        }
+
+        guess = infer_workflow_prompts("", json.dumps(prompt), "auto")
+
+        self.assertEqual(guess.positive, "cat")
+        self.assertEqual(guess.negative, "bad")
+
     def test_auto_clip_trace_from_ui_workflow_sampler(self) -> None:
         workflow = {
             "nodes": [
@@ -100,6 +147,20 @@ class WorkflowPromptInferenceTests(unittest.TestCase):
 
     def test_decode_delimiter_supports_newline_escape(self) -> None:
         self.assertEqual(decode_delimiter("\\n---\\n"), "\n---\n")
+
+    def test_describe_workflow_node_by_id(self) -> None:
+        prompt = {
+            "6": {
+                "class_type": "CLIPTextEncode",
+                "inputs": {"text": "cat"},
+                "_meta": {"title": "positive"},
+            }
+        }
+
+        report = describe_workflow_node("", json.dumps(prompt), "6")
+
+        self.assertIn("CLIPTextEncode", report)
+        self.assertIn("cat", report)
 
 
 if __name__ == "__main__":

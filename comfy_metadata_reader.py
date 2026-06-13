@@ -692,8 +692,18 @@ def main() -> int:
     parser = argparse.ArgumentParser(description="Read ComfyUI image metadata.")
     parser.add_argument("image", help="PNG, WEBP, or JPEG image path")
     args = parser.parse_args()
+    _force_utf8_stdout()
     print(format_report(read_metadata(args.image)))
     return 0
+
+
+def _force_utf8_stdout() -> None:
+    try:
+        import sys
+
+        sys.stdout.reconfigure(encoding="utf-8")
+    except Exception:
+        pass
 
 
 if __name__ == "__main__":
