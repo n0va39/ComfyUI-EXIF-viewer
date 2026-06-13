@@ -23,11 +23,10 @@ dist\ComfyUI-EXIF-viewer.exe
 소스에서 실행:
 
 ```bat
-python -m pip install -r requirements.txt
 run_viewer.bat
 ```
 
-드래그앤드롭은 `tkinterdnd2`가 설치된 환경 또는 빌드된 EXE에서 동작한다.
+`run_viewer.bat`은 `.venv`를 우선 사용하고, 드래그앤드롭에 필요한 `tkinterdnd2`가 없으면 `requirements.txt`를 설치한다.
 
 특정 파일을 바로 열려면:
 
