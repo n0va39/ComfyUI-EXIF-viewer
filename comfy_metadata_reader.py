@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 import argparse
+import gzip
+import io
 import json
 import re
 import struct
@@ -149,16 +151,17 @@ def _with_platform_aliases(entries: list[MetadataEntry]) -> list[MetadataEntry]:
 
         json_data = _parse_json_object(entry.value)
         if isinstance(json_data, dict):
+            comment_value = json_data.get("Comment")
+            if not isinstance(comment_value, str):
+                comment_value = json_data.get("comment")
+            if isinstance(comment_value, str) and comment_value.strip():
+                add("Generic", "comment", comment_value)
+                nested_json = _parse_json_object(comment_value)
+                if isinstance(nested_json, dict):
+                    _add_novelai_aliases(nested_json, add)
+
             if "uc" in json_data and "prompt" in json_data:
-                add("NovelAI", "prompt", _stringify_json_field(json_data.get("prompt")))
-                add("NovelAI", "negative_prompt", _stringify_json_field(json_data.get("uc")))
-                rest = {
-                    key: value
-                    for key, value in json_data.items()
-                    if key not in {"prompt", "uc", "negative_prompt"}
-                }
-                if rest:
-                    add("NovelAI", "settings", json.dumps(rest, indent=2, ensure_ascii=False))
+                _add_novelai_aliases(json_data, add)
             elif "negative_prompt" in json_data and "prompt" in json_data:
                 add("Generic", "prompt", _stringify_json_field(json_data.get("prompt")))
                 add(
@@ -172,6 +175,18 @@ def _with_platform_aliases(entries: list[MetadataEntry]) -> list[MetadataEntry]:
                         add("Generic", key, _stringify_json_field(json_data[key]))
 
     return result
+
+
+def _add_novelai_aliases(json_data: dict[str, Any], add: Any) -> None:
+    add("NovelAI", "prompt", _stringify_json_field(json_data.get("prompt")))
+    add("NovelAI", "negative_prompt", _stringify_json_field(json_data.get("uc")))
+    rest = {
+        key: value
+        for key, value in json_data.items()
+        if key not in {"prompt", "uc", "negative_prompt"}
+    }
+    if rest:
+        add("NovelAI", "settings", json.dumps(rest, indent=2, ensure_ascii=False))
 
 
 def _split_known_prefix(value: str) -> tuple[str, str] | None:
@@ -236,7 +251,135 @@ def _read_png_entries(data: bytes, warnings: list[str]) -> list[MetadataEntry]:
         if chunk_type == b"IEND":
             break
 
+    stealth_info = _read_png_stealth_info(data, warnings)
+    if stealth_info:
+        entries.append(MetadataEntry("PNG stealth", "Comment", stealth_info))
+
     return entries
+
+
+def _read_png_stealth_info(data: bytes, warnings: list[str]) -> str:
+    try:
+        from PIL import Image
+    except ImportError:
+        warnings.append("Pillow is required to read stealth PNG metadata.")
+        return ""
+
+    try:
+        with Image.open(io.BytesIO(data)) as image:
+            image.load()
+            return _read_info_from_image_stealth(image) or ""
+    except Exception as exc:
+        warnings.append(f"Failed to read stealth PNG metadata: {exc}")
+        return ""
+
+
+def _read_info_from_image_stealth(image: Any) -> str | None:
+    width, height = image.size
+    pixels = image.load()
+    has_alpha = image.mode == "RGBA"
+    mode = None
+    compressed = False
+    binary_data = ""
+    buffer_a = ""
+    buffer_rgb = ""
+    index_a = 0
+    index_rgb = 0
+    sig_confirmed = False
+    confirming_signature = True
+    reading_param_len = False
+    reading_param = False
+    read_end = False
+    param_len = 0
+
+    for x in range(width):
+        for y in range(height):
+            pixel = pixels[x, y]
+            if has_alpha:
+                if isinstance(pixel, tuple) and len(pixel) >= 4:
+                    buffer_a += str(pixel[3] & 1)
+                    index_a += 1
+            if isinstance(pixel, tuple) and len(pixel) >= 3:
+                r, g, b = pixel[:3]
+            else:
+                r = g = b = int(pixel)
+            buffer_rgb += str(r & 1)
+            buffer_rgb += str(g & 1)
+            buffer_rgb += str(b & 1)
+            index_rgb += 3
+
+            if confirming_signature:
+                if index_a == len("stealth_pnginfo") * 8:
+                    decoded_sig = _bits_to_text(buffer_a)
+                    if decoded_sig in {"stealth_pnginfo", "stealth_pngcomp"}:
+                        confirming_signature = False
+                        sig_confirmed = True
+                        reading_param_len = True
+                        mode = "alpha"
+                        compressed = decoded_sig == "stealth_pngcomp"
+                        buffer_a = ""
+                        index_a = 0
+                    else:
+                        read_end = True
+                        break
+                elif index_rgb == len("stealth_pnginfo") * 8:
+                    decoded_sig = _bits_to_text(buffer_rgb)
+                    if decoded_sig in {"stealth_rgbinfo", "stealth_rgbcomp"}:
+                        confirming_signature = False
+                        sig_confirmed = True
+                        reading_param_len = True
+                        mode = "rgb"
+                        compressed = decoded_sig == "stealth_rgbcomp"
+                        buffer_rgb = ""
+                        index_rgb = 0
+            elif reading_param_len:
+                if mode == "alpha" and index_a == 32:
+                    param_len = int(buffer_a, 2)
+                    reading_param_len = False
+                    reading_param = True
+                    buffer_a = ""
+                    index_a = 0
+                elif mode == "rgb" and index_rgb == 33:
+                    pop = buffer_rgb[-1]
+                    buffer_rgb = buffer_rgb[:-1]
+                    param_len = int(buffer_rgb, 2)
+                    reading_param_len = False
+                    reading_param = True
+                    buffer_rgb = pop
+                    index_rgb = 1
+            elif reading_param:
+                if mode == "alpha" and index_a == param_len:
+                    binary_data = buffer_a
+                    read_end = True
+                    break
+                if mode == "rgb" and index_rgb >= param_len:
+                    diff = param_len - index_rgb
+                    if diff < 0:
+                        buffer_rgb = buffer_rgb[:diff]
+                    binary_data = buffer_rgb
+                    read_end = True
+                    break
+            else:
+                read_end = True
+                break
+        if read_end:
+            break
+
+    if not sig_confirmed or not binary_data:
+        return None
+
+    byte_data = bytes(
+        int(binary_data[i : i + 8], 2) for i in range(0, len(binary_data), 8)
+    )
+    if compressed:
+        return gzip.decompress(byte_data).decode("utf-8")
+    return byte_data.decode("utf-8", errors="ignore")
+
+
+def _bits_to_text(bits: str) -> str:
+    return bytearray(
+        int(bits[i : i + 8], 2) for i in range(0, len(bits), 8)
+    ).decode("utf-8", errors="ignore")
 
 
 def _parse_png_text_chunk(chunk: bytes) -> tuple[str, str] | None:

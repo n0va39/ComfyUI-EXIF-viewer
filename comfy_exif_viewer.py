@@ -2,9 +2,13 @@ from __future__ import annotations
 
 import argparse
 import ctypes
+import hashlib
 import os
+import tempfile
 import tkinter as tk
 import tkinter.font as tkfont
+import urllib.parse
+import urllib.request
 import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
@@ -27,9 +31,10 @@ from comfy_workflow_prompts import decode_delimiter, infer_workflow_prompts
 from comfy_workflow_prompts import describe_workflow_node
 
 try:
-    from tkinterdnd2 import DND_FILES, TkinterDnD
+    from tkinterdnd2 import DND_FILES, DND_TEXT, TkinterDnD
 except ImportError:
     DND_FILES = None
+    DND_TEXT = None
     TkinterDnD = None
 
 
@@ -40,6 +45,10 @@ SUPPORTED_FILETYPES = (
     ("JPEG files", "*.jpg *.jpeg"),
     ("All files", "*.*"),
 )
+
+SUPPORTED_SUFFIXES = {".png", ".webp", ".jpg", ".jpeg"}
+MAX_DROP_DOWNLOAD_BYTES = 100 * 1024 * 1024
+ALLOWED_DROP_URL_HOSTS = {"ac-o.namu.la"}
 
 
 def enable_high_dpi_awareness() -> None:
@@ -481,24 +490,119 @@ class MetadataViewer(BaseTk):
             )
             return
 
+        dnd_types = tuple(value for value in (DND_FILES, DND_TEXT) if value)
         for widget in (self, self.drop_frame, self.drop_label):
-            widget.drop_target_register(DND_FILES)
+            widget.drop_target_register(*dnd_types)
             widget.dnd_bind("<<Drop>>", self._handle_drop)
 
     def _handle_drop(self, event: object) -> None:
         data = getattr(event, "data", "")
-        paths = self.tk.splitlist(data)
-        if not paths:
-            return
-        if len(paths) > 1:
-            messagebox.showinfo("Drop image", "Drop one image file at a time.")
+        items = self._parse_drop_items(data)
+        if not items:
             return
 
-        path = Path(paths[0])
-        if path.suffix.lower() not in {".png", ".webp", ".jpg", ".jpeg"}:
-            messagebox.showinfo("Unsupported file", "Use PNG, WEBP, JPG, or JPEG.")
+        item = self._first_supported_drop_item(items)
+        if not item:
+            messagebox.showinfo(
+                "Unsupported drop",
+                "Drop a PNG, WEBP, JPG, JPEG file, or a direct image URL.",
+            )
+            return
+
+        parsed = urllib.parse.urlparse(item)
+        if parsed.scheme in {"http", "https"}:
+            self.open_url(item)
+            return
+        if parsed.scheme == "file":
+            self.open_path(Path(urllib.request.url2pathname(parsed.path)))
+            return
+        self.open_path(Path(item))
+
+    def _parse_drop_items(self, data: str) -> list[str]:
+        try:
+            split_items = list(self.tk.splitlist(data))
+        except tk.TclError:
+            split_items = []
+
+        if not split_items:
+            split_items = data.replace("\r", "\n").split("\n")
+
+        items = []
+        for item in split_items:
+            stripped = item.strip()
+            if not stripped or stripped.startswith("#"):
+                continue
+            if stripped.lower().startswith("url="):
+                stripped = stripped.split("=", 1)[1].strip()
+            items.append(stripped)
+        return items
+
+    def _first_supported_drop_item(self, items: list[str]) -> str:
+        for item in items:
+            parsed = urllib.parse.urlparse(item)
+            if _is_allowed_drop_url(item):
+                return item
+            if parsed.scheme in {"http", "https"}:
+                continue
+            if parsed.scheme == "file":
+                suffix = Path(urllib.request.url2pathname(parsed.path)).suffix.lower()
+                if suffix in SUPPORTED_SUFFIXES:
+                    return item
+                continue
+            if Path(item).suffix.lower() in SUPPORTED_SUFFIXES:
+                return item
+        return ""
+
+    def open_url(self, url: str) -> None:
+        if not _is_allowed_drop_url(url):
+            messagebox.showerror(
+                "Unsupported URL",
+                "Only ac-o.namu.la image URLs are allowed for security.",
+            )
+            return
+        self.status_var.set("Downloading dropped image URL...")
+        self.update_idletasks()
+        try:
+            path = self._download_image_url(url)
+        except Exception as exc:
+            messagebox.showerror("Download failed", str(exc))
+            self.status_var.set("Image URL download failed.")
             return
         self.open_path(path)
+
+    def _download_image_url(self, url: str) -> Path:
+        if not _is_allowed_drop_url(url):
+            raise ValueError("Only ac-o.namu.la image URLs are allowed.")
+
+        request = urllib.request.Request(
+            url,
+            headers={
+                "User-Agent": (
+                    "Mozilla/5.0 ComfyUI-EXIF-viewer "
+                    "(image metadata drag-and-drop)"
+                )
+            },
+        )
+        with urllib.request.urlopen(request, timeout=20) as response:
+            content_type = response.headers.get("Content-Type", "").split(";", 1)[0]
+            content_length = response.headers.get("Content-Length")
+            if content_length and int(content_length) > MAX_DROP_DOWNLOAD_BYTES:
+                raise ValueError("Dropped image URL is too large.")
+
+            suffix = _suffix_from_url_or_content_type(url, content_type)
+            if suffix not in SUPPORTED_SUFFIXES:
+                raise ValueError("Dropped URL does not look like a supported image.")
+
+            data = response.read(MAX_DROP_DOWNLOAD_BYTES + 1)
+            if len(data) > MAX_DROP_DOWNLOAD_BYTES:
+                raise ValueError("Dropped image URL is too large.")
+
+        temp_dir = Path(tempfile.gettempdir()) / "ComfyUI-EXIF-viewer"
+        temp_dir.mkdir(parents=True, exist_ok=True)
+        digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+        path = temp_dir / f"chrome-drop-{digest}{suffix}"
+        path.write_bytes(data)
+        return path
 
     def _schedule_preview_refresh(self, _event: object | None = None) -> None:
         if self.current_image_path is None:
@@ -542,6 +646,26 @@ class MetadataViewer(BaseTk):
         if format_name:
             label = f"{label}\n{format_name}"
         self.drop_label.configure(image=photo, text=label, compound=tk.TOP)
+
+
+def _suffix_from_url_or_content_type(url: str, content_type: str) -> str:
+    suffix = Path(urllib.parse.urlparse(url).path).suffix.lower()
+    if suffix in SUPPORTED_SUFFIXES:
+        return suffix
+    return {
+        "image/png": ".png",
+        "image/webp": ".webp",
+        "image/jpeg": ".jpg",
+        "image/jpg": ".jpg",
+    }.get(content_type.lower(), "")
+
+
+def _is_allowed_drop_url(url: str) -> bool:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme not in {"https"}:
+        return False
+    hostname = (parsed.hostname or "").lower()
+    return hostname in ALLOWED_DROP_URL_HOSTS
 
 
 def main() -> int:

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import struct
 import tempfile
 import unittest
@@ -76,6 +77,36 @@ def make_webp_with_exif(exif: bytes) -> bytes:
     return b"RIFF" + struct.pack("<I", riff_size) + b"WEBP" + chunk
 
 
+def make_stealth_png(payload: str) -> bytes:
+    try:
+        from PIL import Image
+    except ImportError as exc:
+        raise unittest.SkipTest("Pillow is required for stealth PNG test") from exc
+
+    payload_bits = "".join(f"{byte:08b}" for byte in payload.encode("utf-8"))
+    bits = (
+        "".join(f"{byte:08b}" for byte in b"stealth_pnginfo")
+        + f"{len(payload_bits):032b}"
+        + payload_bits
+    )
+    image = Image.new("RGBA", (32, 32), (255, 255, 255, 254))
+    pixels = image.load()
+    index = 0
+    for x in range(image.width):
+        for y in range(image.height):
+            r, g, b, a = pixels[x, y]
+            if index < len(bits):
+                a = (a & 0xFE) | int(bits[index])
+                index += 1
+            pixels[x, y] = (r, g, b, a)
+
+    from io import BytesIO
+
+    output = BytesIO()
+    image.save(output, format="PNG")
+    return output.getvalue()
+
+
 class MetadataReaderTests(unittest.TestCase):
     def test_reads_png_parameters_text(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -111,6 +142,21 @@ class MetadataReaderTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "sample.png"
             path.write_bytes(make_png_with_text("Comment", payload))
+
+            result = read_metadata(path)
+
+        sections = extract_sections(result)
+        self.assertEqual(sections.platform, "NovelAI")
+        self.assertEqual(sections.prompt, "cat")
+        self.assertEqual(sections.negative_prompt, "dog")
+        self.assertIn('"steps": 28', sections.settings)
+
+    def test_reads_novelai_stealth_png_comment_json(self) -> None:
+        inner = '{"prompt":"cat","uc":"dog","steps":28,"sampler":"k_euler"}'
+        outer = '{"Comment":' + json.dumps(inner) + "}"
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "sample.png"
+            path.write_bytes(make_stealth_png(outer))
 
             result = read_metadata(path)
 

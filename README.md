@@ -51,6 +51,7 @@ build_exe.bat
 ## 지원 형식
 
 - PNG: `tEXt`, `zTXt`, `iTXt`
+- PNG stealth metadata: `stealth_pnginfo`, `stealth_pngcomp`, `stealth_rgbinfo`, `stealth_rgbcomp`
 - WEBP: RIFF `EXIF`, `XMP`
 - JPEG: APP1 EXIF, XMP, Comment
 
@@ -65,6 +66,7 @@ build_exe.bat
 
 - Windows DPI scaling을 적용해 150% 배율에서 창과 텍스트 크기를 보정한다.
 - 좌측 드롭 영역에 이미지 파일을 끌어다 놓으면 썸네일을 표시한다.
+- Chrome 등 브라우저에서 아카라이브 이미지 URL(`ac-o.namu.la`)을 끌어오면 임시 파일로 다운로드한 뒤 메타데이터를 읽는다.
 - 우측 탭에서 Prompt, Negative, Settings, Resources, Workflow, Raw를 분리해서 확인한다.
 - `Resources` 탭은 메타데이터에 확정 저장된 `Civitai resources`만 표시한다.
 - [`alexopus/ComfyUI-Image-Saver`](https://github.com/alexopus/ComfyUI-Image-Saver) 커스텀 노드 방식으로 저장된 리소스는 이름을 클릭해 `civitai.red`의 해당 모델 버전으로 연결할 수 있다.
