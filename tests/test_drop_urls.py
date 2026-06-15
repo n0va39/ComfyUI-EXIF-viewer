@@ -11,6 +11,7 @@ from comfy_exif_viewer import (
     _clear_app_cache_files,
     _format_bytes,
     _is_allowed_drop_url,
+    _is_supported_drop_item,
     _load_recent_paths,
     _save_recent_paths,
     _suffix_from_url_or_content_type,
@@ -31,6 +32,17 @@ class DropUrlTests(unittest.TestCase):
 
     def test_blocks_non_https_urls(self) -> None:
         self.assertFalse(_is_allowed_drop_url("http://ac-o.namu.la/sample.png"))
+
+    def test_supports_local_files_and_allowed_urls_for_drop_queue(self) -> None:
+        self.assertTrue(_is_supported_drop_item(r"D:\images\sample.png"))
+        self.assertTrue(_is_supported_drop_item(r"D:\images\sample.webp"))
+        self.assertTrue(
+            _is_supported_drop_item(
+                "https://ac-o.namu.la/20260615sac/sample.png?type=orig"
+            )
+        )
+        self.assertFalse(_is_supported_drop_item(r"D:\images\sample.txt"))
+        self.assertFalse(_is_supported_drop_item("https://example.com/sample.png"))
 
     def test_uses_content_type_when_url_has_no_suffix(self) -> None:
         self.assertEqual(

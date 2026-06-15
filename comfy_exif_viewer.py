@@ -106,6 +106,8 @@ class MetadataViewer(BaseTk):
         self.recent_paths: list[Path] = _load_recent_paths()
         self.recent_expanded = True
         self.content_pane: tk.PanedWindow | None = None
+        self.drop_queue: list[str] = []
+        self.processing_drop_queue = False
         self.preview_photo: object | None = None
         self.preview_after_id: str | None = None
         self.download_thread: threading.Thread | None = None
@@ -939,23 +941,48 @@ class MetadataViewer(BaseTk):
         if not items:
             return False
 
-        item = self._first_supported_drop_item(items)
-        if not item:
+        supported_items = self._supported_drop_items(items)
+        if not supported_items:
             messagebox.showinfo(
                 "Unsupported drop",
                 "Drop a PNG, WEBP, JPG, JPEG file, or a direct image URL.",
             )
             return False
 
+        self.drop_queue.extend(supported_items)
+        if self.processing_drop_queue or (
+            self.download_thread is not None and self.download_thread.is_alive()
+        ):
+            self.status_var.set(
+                f"Queued {len(supported_items)} image(s). "
+                f"{len(self.drop_queue)} waiting."
+            )
+            return True
+
+        self._process_next_drop_queue_item()
+        return True
+
+    def _process_next_drop_queue_item(self) -> None:
+        if self.download_thread is not None and self.download_thread.is_alive():
+            return
+
+        if not self.drop_queue:
+            self.processing_drop_queue = False
+            return
+
+        self.processing_drop_queue = True
+        item = self.drop_queue.pop(0)
         parsed = urllib.parse.urlparse(item)
         if parsed.scheme in {"http", "https"}:
-            self.open_url(item)
-            return True
+            self.open_url(item, from_queue=True)
+            return
+
         if parsed.scheme == "file":
             self.open_path(Path(urllib.request.url2pathname(parsed.path)))
-            return True
-        self.open_path(Path(item))
-        return True
+        else:
+            self.open_path(Path(item))
+
+        self.after(0, self._process_next_drop_queue_item)
 
     def _parse_drop_items(self, data: str) -> list[str]:
         try:
@@ -976,23 +1003,10 @@ class MetadataViewer(BaseTk):
             items.append(stripped)
         return items
 
-    def _first_supported_drop_item(self, items: list[str]) -> str:
-        for item in items:
-            parsed = urllib.parse.urlparse(item)
-            if _is_allowed_drop_url(item):
-                return item
-            if parsed.scheme in {"http", "https"}:
-                continue
-            if parsed.scheme == "file":
-                suffix = Path(urllib.request.url2pathname(parsed.path)).suffix.lower()
-                if suffix in SUPPORTED_SUFFIXES:
-                    return item
-                continue
-            if Path(item).suffix.lower() in SUPPORTED_SUFFIXES:
-                return item
-        return ""
+    def _supported_drop_items(self, items: list[str]) -> list[str]:
+        return [item for item in items if _is_supported_drop_item(item)]
 
-    def open_url(self, url: str) -> None:
+    def open_url(self, url: str, from_queue: bool = False) -> None:
         if not _is_allowed_drop_url(url):
             messagebox.showerror(
                 "Unsupported URL",
@@ -1001,10 +1015,17 @@ class MetadataViewer(BaseTk):
             return
 
         if self.download_thread is not None and self.download_thread.is_alive():
-            self.status_var.set("A dropped image URL is already downloading.")
+            if not from_queue:
+                self.drop_queue.append(url)
+            self.status_var.set(
+                f"Queued dropped image URL. {len(self.drop_queue)} waiting."
+            )
             return
 
-        self.status_var.set("Downloading dropped image URL...")
+        self.status_var.set(
+            "Downloading dropped image URL..."
+            + self._drop_queue_status_suffix()
+        )
         self._show_download_progress()
         self.drop_frame.configure(cursor="watch")
         self.drop_label.configure(cursor="watch")
@@ -1031,10 +1052,21 @@ class MetadataViewer(BaseTk):
         self._hide_download_progress()
         if error:
             messagebox.showerror("Download failed", error)
-            self.status_var.set("Image URL download failed.")
+            self.status_var.set(
+                "Image URL download failed." + self._drop_queue_status_suffix()
+            )
+            if self.processing_drop_queue:
+                self.after(0, self._process_next_drop_queue_item)
             return
         if path is not None:
             self.open_path(path)
+        if self.processing_drop_queue:
+            self.after(0, self._process_next_drop_queue_item)
+
+    def _drop_queue_status_suffix(self) -> str:
+        if not self.drop_queue:
+            return ""
+        return f" {len(self.drop_queue)} queued."
 
     def _download_image_url(self, url: str) -> Path:
         if not _is_allowed_drop_url(url):
@@ -1193,6 +1225,18 @@ def _is_allowed_drop_url(url: str) -> bool:
         return False
     hostname = (parsed.hostname or "").lower()
     return hostname in ALLOWED_DROP_URL_HOSTS
+
+
+def _is_supported_drop_item(item: str) -> bool:
+    parsed = urllib.parse.urlparse(item)
+    if _is_allowed_drop_url(item):
+        return True
+    if parsed.scheme in {"http", "https"}:
+        return False
+    if parsed.scheme == "file":
+        suffix = Path(urllib.request.url2pathname(parsed.path)).suffix.lower()
+        return suffix in SUPPORTED_SUFFIXES
+    return Path(item).suffix.lower() in SUPPORTED_SUFFIXES
 
 
 def _format_bytes(value: int) -> str:
