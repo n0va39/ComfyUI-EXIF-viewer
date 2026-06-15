@@ -66,7 +66,14 @@ build_exe.bat
 
 - Windows DPI scaling을 적용해 150% 배율에서 창과 텍스트 크기를 보정한다.
 - 좌측 드롭 영역에 이미지 파일을 끌어다 놓으면 썸네일을 표시한다.
+- 좌측 드롭 영역을 클릭한 뒤 `Ctrl+V`로 이미지 URL, 로컬 파일 경로, 클립보드 이미지를 붙여넣을 수 있다.
+- 최근에 열거나 드롭한 이미지는 좌측 `Recent images` 목록에서 더블클릭해 다시 열 수 있다.
+- `View > Recent Images`에서 최근 이미지 목록 표시를 켜고 끌 수 있다.
+- 최근 이미지 목록은 `%LOCALAPPDATA%\ComfyUI-EXIF-viewer\recent_images.json`에 저장되어 다시 실행해도 유지된다.
 - Chrome 등 브라우저에서 아카라이브 이미지 URL(`ac-o.namu.la`)을 끌어오면 임시 파일로 다운로드한 뒤 메타데이터를 읽는다.
+- 아카라이브 URL 다운로드와 클립보드 이미지는 `%LOCALAPPDATA%\ComfyUI-EXIF-viewer\cache`에 저장된다.
+- 좌상단 `File` 메뉴에서 이미지 열기, 현재 탭 복사/저장, 캐시 삭제를 관리한다.
+- `File > Clear Cache`에서 최근 이미지 목록과 앱이 만든 다운로드 캐시를 지울 수 있다. 로컬 원본 이미지는 삭제하지 않는다.
 - 우측 탭에서 Prompt, Negative, Settings, Resources, Workflow, Raw를 분리해서 확인한다.
 - `Resources` 탭은 메타데이터에 확정 저장된 `Civitai resources`만 표시한다.
 - [`alexopus/ComfyUI-Image-Saver`](https://github.com/alexopus/ComfyUI-Image-Saver) 커스텀 노드 방식으로 저장된 리소스는 이름을 클릭해 `civitai.red`의 해당 모델 버전으로 연결할 수 있다.
