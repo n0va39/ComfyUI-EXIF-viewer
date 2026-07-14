@@ -85,7 +85,7 @@ build_exe.bat
 
 ![워크플로우 프롬프트 추측](image/%EC%B6%94%EC%B8%A1.png)
 
-ComfyUI 워크플로우만 있고 A1111/WebUI `parameters`가 없을 때 `Workflow prompt guess`를 켜면 첫 번째 샘플러 기준으로 CLIPTextEncode 입력을 추적해 프롬프트를 보조적으로 추정한다.
+ComfyUI 워크플로우만 있고 A1111/WebUI `parameters`가 없을 때 `Workflow prompt guess`를 켜면 첫 번째 활성 샘플러 기준으로 conditioning/text 입력을 역추적해 프롬프트를 보조적으로 추정한다. 일반 그래프뿐 아니라 ComfyUI Node 2.0 서브그래프도 확인한다.
 
 ### Civitai 리소스 확인
 
@@ -98,7 +98,7 @@ ComfyUI 워크플로우만 있고 A1111/WebUI `parameters`가 없을 때 `Workfl
 A1111/WebUI `parameters`가 없는 ComfyUI 이미지에서만 보조적으로 사용한다.
 
 - 기본값은 OFF이며, 켜기 전에는 워크플로우 추적을 실행하지 않는다.
-- `Auto CLIP`: KSampler의 `positive`/`negative` 입력에서 CLIPTextEncode 노드를 역추적한다.
+- `Auto CLIP`: 첫 번째 활성 KSampler/Sampler의 `positive`/`negative` 입력에서 CLIPTextEncode, Context, pipe, text 노드를 역추적한다.
 - `Manual nodes`: Positive/Negative 노드 ID를 직접 입력한다. 여러 노드는 쉼표, 공백, 세미콜론으로 구분한다.
 - `Concat`: 여러 텍스트 노드를 합칠 때 사용할 구분자이다. `\n` 같은 escape 문자를 사용할 수 있다.
 - 추측 결과와 추적 정보는 `Guess` 탭에 표시된다.
@@ -107,14 +107,18 @@ A1111/WebUI `parameters`가 없는 ComfyUI 이미지에서만 보조적으로 �
 
 워크플로우 추측은 특정 커스텀 노드 이름만 대상으로 하지 않고, 저장된 ComfyUI API prompt/workflow 그래프의 노드 타입과 입력 이름을 기준으로 처리한다.
 
-- Sampler 계열: 타입 또는 클래스명에 `sampler`가 포함된 노드. `selector`, `config`는 제외한다. 여러 샘플러가 있으면 가장 먼저 실행되는 샘플러를 기준으로 한다.
-- CLIP text encode 계열: 타입 또는 클래스명에 `cliptextencode`가 포함된 노드.
-- Context 계열: 타입 또는 클래스명에 `context`가 포함된 노드. 출력 포트 기준으로 `positive`, `negative`, `base_ctx`를 추적한다.
-- Text/String 노드: `caption`, `prompt`, `text`, `string`, `value`, `positive`, `negative` 입력 값을 가진 노드.
-- Text/String concat 계열: `text_1`, `prompt_1`, `string_1`처럼 번호가 붙은 입력을 가진 병합 노드.
-- UI workflow 저장값: `widgets_values` 또는 `properties`에 들어 있는 문자열 값.
+- Sampler 계열: 타입 또는 클래스명에 `sampler`가 포함된 노드. `selector`, `config`는 제외하며 mute/bypass 상태를 구분한다. Sampler 이름의 Node 2.0 서브그래프 인스턴스도 확인한다.
+- CLIP/Text encode 계열: `CLIPTextEncode`, SDXL encoder, Wildcard encoder처럼 타입 또는 클래스명에 `textencode`가 포함된 노드.
+- Context/pipe 계열: 출력 포트와 출력 이름을 기준으로 `positive`, `negative`, `base_ctx`, `CONDITIONING+`, `CONDITIONING-`를 구분한다.
+- Text/String 노드: `caption`, `prompt`, `positive_prompt`, `negative_prompt`, `text_g`, `text_l`, `populated_text`, `wildcard_text`, `string`, `value` 등의 입력 값을 처리한다.
+- Text/String concat 계열: `text_1`뿐 아니라 Comfyroll 방식의 `text1`, `text2`도 인식하며 저장된 `separator`를 적용한다.
+- UI workflow: 배열형 링크와 Node 2.0 객체형 링크, `definitions.subgraphs`, `widgets_values`, `properties`를 처리한다.
+- Set/Get와 bypass: KJNodes Set/Get 이름을 따라가고 bypass 입력을 통과한다. 연결된 텍스트 입력이 있으면 변환 전의 오래된 위젯값은 사용하지 않는다.
+- 실행 결과 캐시: pysssss `ShowText`가 같은 출력 포트에 연결되어 있으면 워크플로우에 저장된 표시값을 우선 사용한다.
 
-동작 확인된 예시는 `CLIPTextEncode`, `KSampler`/Sampler 계열, `PrimitiveStringMultiline`, `StringConcatenate`, `Merge Strings v2 [RvTools]`, Context/pipe 계열 노드이다. 위 패턴에 맞지 않는 커스텀 노드는 `Manual nodes`에서 노드 ID를 지정해도 텍스트를 찾지 못할 수 있다.
+동작 확인 범위에는 ComfyUI 기본 `CLIPTextEncode`/`KSampler`, rgthree Context, KJNodes Set/Get, Impact/Inspire Wildcard의 populated prompt, Efficiency Loader의 `CONDITIONING+/-`, Comfyroll Text Concatenate, pysssss ShowText, Node 2.0 서브그래프가 포함된다.
+
+이 기능은 저장된 그래프와 문자열을 이용하는 보조 추정이다. 실행 시점에만 생성되고 `prompt`, `workflow`, `ShowText` 등에 저장되지 않은 동적 문자열은 복원할 수 없다. 해당 경우 API prompt 메타데이터가 함께 저장된 이미지가 가장 정확하다.
 
 ## 테스트
 
