@@ -1,127 +1,127 @@
 # ComfyUI EXIF Viewer
 
-ComfyUI 이미지 메타데이터를 확인하는 간단한 뷰어이다.
+ComfyUI, A1111/WebUI, NovelAI 이미지에 저장된 프롬프트와 생성 설정을 확인하는 Windows 메타데이터 뷰어입니다. PNG뿐 아니라 WEBP/JPEG의 EXIF `UserComment`와 XMP도 읽습니다.
 
-UI 흐름은 원본 저장소 `DCP-arca/NAI-Tag-Viewer`의 이미지 드롭 영역과 프롬프트/옵션 분리 표시를 참고했다.
+[최신 Windows EXE 다운로드](https://github.com/n0va39/ComfyUI-EXIF-viewer/releases/latest/download/ComfyUI-EXIF-viewer.exe) · [전체 릴리스](https://github.com/n0va39/ComfyUI-EXIF-viewer/releases) · [프롬프트 추적 지원 문서](docs/PROMPT_TRACKING.md)
 
-https://github.com/DCP-arca/NAI-Tag-Viewer
+## 빠른 시작
 
-## 원인
+1. 최신 릴리스의 `ComfyUI-EXIF-viewer.exe`를 다운로드해 실행합니다. 설치 과정은 없습니다.
+2. 이미지 파일을 창 왼쪽에 드롭하거나 드롭 영역을 클릭해 파일을 엽니다.
+3. `Prompt`, `Negative`, `Settings`, `Resources`, `Workflow`, `Raw` 탭에서 저장된 정보를 확인합니다.
 
-기존 `ndg_gui.exe`의 원본인 `DCP-arca/NAI-Tag-Viewer`는 README 기준 PNG 중심 뷰어이며, `NaiDictGetter.py`도 PIL `img.info`와 stealth PNG 정보를 주로 확인한다.
+여러 파일이나 지원 URL을 한 번에 드롭하면 대기열에 추가되어 순서대로 열립니다. 드롭 영역을 선택한 뒤 `Ctrl+V`를 누르면 로컬 파일 경로, 이미지 URL 또는 클립보드 이미지도 열 수 있습니다.
 
-[`alexopus/ComfyUI-Image-Saver`](https://github.com/alexopus/ComfyUI-Image-Saver)는 PNG에는 `parameters`, `prompt`, `workflow`를 PNG 텍스트 청크로 저장하지만, JPEG/WEBP에는 A1111/Civitai 형식 문자열을 EXIF `UserComment`에 저장한다. 따라서 WEBP의 RIFF `EXIF` 청크와 TIFF/EXIF `UserComment`를 직접 읽지 않으면 Civitai에서는 보이는 정보가 로컬 뷰어에서는 보이지 않을 수 있다.
+## 주요 기능
 
-## 실행 방법
+- PNG, WEBP, JPEG에 저장된 ComfyUI/A1111/NovelAI 메타데이터 표시
+- Prompt, Negative, Settings, Civitai Resources, Workflow, Raw 데이터 분리
+- 여러 이미지와 URL의 순차 열기
+- 최근 이미지 목록과 앱 다운로드 캐시 관리
+- A1111 `parameters`가 없는 ComfyUI 이미지의 워크플로우 프롬프트 보조 추정
+- Windows DPI 배율 보정과 이미지 미리보기
 
-EXE 빌드 후 실행:
+## 지원 파일과 메타데이터
 
-```bat
-dist\ComfyUI-EXIF-viewer.exe
-```
+| 파일 | 읽는 영역 |
+| --- | --- |
+| PNG | `tEXt`, `zTXt`, `iTXt` |
+| PNG stealth metadata | `stealth_pnginfo`, `stealth_pngcomp`, `stealth_rgbinfo`, `stealth_rgbcomp` |
+| WEBP | RIFF `EXIF`, `XMP` |
+| JPEG | APP1 EXIF, XMP, Comment |
 
-소스에서 실행:
+| 생성 도구 | 인식하는 데이터 |
+| --- | --- |
+| ComfyUI | `parameters`, API `prompt`, UI `workflow` |
+| A1111/WebUI 호환 도구 | `parameters`, EXIF `UserComment` |
+| NovelAI | PNG `Comment` JSON의 `prompt`, `uc` |
+| 기타 | EXIF, XMP, Comment 원문 |
+
+메타데이터가 이미지에 저장되지 않았다면 이 프로그램도 해당 값을 복원할 수 없습니다.
+
+## 화면과 데이터 관리
+
+- `File` 메뉴에서 이미지 열기, 현재 탭 복사/저장, 앱 캐시 삭제를 실행할 수 있습니다.
+- `Recent images`에서 최근 파일을 다시 열 수 있으며 `View > Recent Images`로 목록 표시를 전환할 수 있습니다.
+- 최근 목록은 `%LOCALAPPDATA%\ComfyUI-EXIF-viewer\recent_images.json`에 저장됩니다.
+- 클립보드 이미지와 허용된 HTTPS 이미지 URL의 다운로드 결과는 `%LOCALAPPDATA%\ComfyUI-EXIF-viewer\cache`에 저장됩니다.
+- `File > Clear Cache`는 앱이 만든 최근 목록과 다운로드 캐시만 지우며 로컬 원본 이미지는 삭제하지 않습니다.
+- URL 드롭은 현재 `https://ac-o.namu.la/...` 주소만 허용합니다.
+
+## 워크플로우 프롬프트 추측
+
+![워크플로우 프롬프트 추측](image/%EC%B6%94%EC%B8%A1.png)
+
+ComfyUI `workflow` 또는 API `prompt`는 있지만 A1111/WebUI `parameters`가 없는 이미지에서 사용할 수 있는 보조 기능입니다. 기본값은 OFF이며, 활성화한 경우에만 그래프 추적을 실행합니다.
+
+- `Auto CLIP`: 첫 번째 활성 Sampler의 `positive`/`negative` 입력에서 텍스트 원본을 역추적합니다.
+- `Manual nodes`: Positive/Negative 노드 ID를 직접 지정합니다. ID는 쉼표, 공백 또는 세미콜론으로 구분합니다.
+- `Concat`: 여러 텍스트를 합칠 구분자입니다. `\n` 같은 escape 문자를 사용할 수 있습니다.
+- 결과와 추적 경로, 경고는 `Guess` 탭에 표시됩니다.
+
+자동 추적은 특정 노드 팩의 설치 여부가 아니라 이미지에 저장된 노드 타입, 입력 이름, 출력 포트와 링크 구조를 기준으로 동작합니다.
+
+| 지원 범위 | 대표 예시 |
+| --- | --- |
+| 기본 Sampler와 Text Encode | `KSampler`, `CLIPTextEncode`, SDXL Text Encode |
+| Context/pipe | rgthree Context의 positive/negative 출력, `base_ctx` |
+| 가상 연결과 bypass | KJNodes `SetNode`/`GetNode`, bypass 노드 |
+| 다중 conditioning 출력 | Efficiency Loader의 `CONDITIONING+`/`CONDITIONING-` |
+| 문자열 결합 | Comfyroll `CR Text Concatenate`, 번호형 text/string/prompt 입력 |
+| 실행 결과가 저장된 표시 노드 | pysssss `ShowText` |
+| Wildcard/동적 프롬프트의 저장 결과 | `populated_text`, `wildcard_text` |
+| 최신 워크플로우 구조 | ComfyUI Node 2.0 `definitions.subgraphs`와 객체형 링크 |
+
+지원 판정 규칙, 정확한 입력 키, 출력 포트 처리, 새 노드 추가 절차는 [프롬프트 추적 지원 및 확장 가이드](docs/PROMPT_TRACKING.md)를 참고하세요.
+
+### 추정할 수 없는 경우
+
+- 실행 시점에만 만들어지고 API `prompt`, UI `workflow`, `ShowText` 등에 저장되지 않은 문자열
+- 텍스트와 conditioning 사이의 연결이 저장 데이터에서 끊긴 워크플로우
+- 출력 포트의 positive/negative 의미를 저장된 정보만으로 구분할 수 없는 커스텀 노드
+
+이 기능은 원본 프롬프트를 보장하는 복구 기능이 아닙니다. API `prompt` 메타데이터까지 함께 저장된 이미지가 가장 정확합니다. A1111/WebUI `parameters`가 이미 있으면 저장된 값을 우선하며 추측은 실행하지 않습니다.
+
+## Civitai 리소스
+
+![ComfyUI Image Saver Civitai 리소스](image/image%20saver.png)
+
+[`alexopus/ComfyUI-Image-Saver`](https://github.com/alexopus/ComfyUI-Image-Saver)가 저장한 `Civitai resources`가 있으면 `Resources` 탭에서 이름, 버전, 가중치와 AIR를 표시합니다. 리소스 이름을 클릭하면 `civitai.red`의 해당 모델 버전으로 이동합니다. 메타데이터에 확정 저장된 리소스만 표시하며 프롬프트 문자열에서 임의로 추정하지 않습니다.
+
+## 소스에서 실행
 
 ```bat
 run_viewer.bat
 ```
 
-`run_viewer.bat`은 `.venv`를 우선 사용하고, 드래그앤드롭/이미지 미리보기에 필요한 패키지가 없으면 `requirements.txt`를 설치한다.
-
-특정 파일을 바로 열려면:
+`run_viewer.bat`은 `.venv`를 우선 사용하며 필요한 패키지가 없으면 `requirements.txt`를 설치합니다. 특정 이미지를 바로 열 수도 있습니다.
 
 ```bat
-run_viewer.bat "sample\style_1_2026-06-13-151752.webp"
+run_viewer.bat "C:\path\to\image.webp"
 ```
 
-터미널에서 텍스트로 확인하려면:
+GUI 없이 터미널에서 메타데이터를 출력하려면 다음 명령을 사용합니다.
 
 ```bat
-python comfy_exif_viewer.py --dump "sample\style_1_2026-06-13-151752.webp"
+.venv\Scripts\python.exe comfy_exif_viewer.py --dump "C:\path\to\image.webp"
 ```
 
-## EXE 빌드
+## 빌드와 테스트
+
+Windows 단일 EXE 빌드:
 
 ```bat
 build_exe.bat
 ```
 
-빌드 결과는 `dist\ComfyUI-EXIF-viewer.exe`에 생성된다.
+결과는 `dist\ComfyUI-EXIF-viewer.exe`에 생성됩니다.
 
-## 지원 형식
-
-- PNG: `tEXt`, `zTXt`, `iTXt`
-- PNG stealth metadata: `stealth_pnginfo`, `stealth_pngcomp`, `stealth_rgbinfo`, `stealth_rgbcomp`
-- WEBP: RIFF `EXIF`, `XMP`
-- JPEG: APP1 EXIF, XMP, Comment
-
-## 지원 플랫폼
-
-- ComfyUI: `parameters`, `prompt`, `workflow`
-- A1111/WebUI 호환: `parameters`, EXIF `UserComment`
-- NovelAI: PNG `Comment` JSON의 `prompt`, `uc`
-- 기타: EXIF/XMP/Comment 원본 표시
-
-## UI
-
-- Windows DPI scaling을 적용해 150% 배율에서 창과 텍스트 크기를 보정한다.
-- 좌측 드롭 영역에 이미지 파일을 끌어다 놓으면 썸네일을 표시한다.
-- 여러 이미지 파일이나 URL을 한 번에 드롭하거나 다운로드 중 다시 드롭하면 지원되는 항목을 대기열에 추가해 순서대로 연다.
-- 좌측 드롭 영역을 클릭한 뒤 `Ctrl+V`로 이미지 URL, 로컬 파일 경로, 클립보드 이미지를 붙여넣을 수 있다.
-- 최근에 열거나 드롭한 이미지는 좌측 `Recent images` 목록에서 더블클릭해 다시 열 수 있다.
-- `View > Recent Images`에서 최근 이미지 목록 표시를 켜고 끌 수 있다.
-- 최근 이미지 목록은 `%LOCALAPPDATA%\ComfyUI-EXIF-viewer\recent_images.json`에 저장되어 다시 실행해도 유지된다.
-- Chrome 등 브라우저에서 아카라이브 이미지 URL(`ac-o.namu.la`)을 끌어오면 임시 파일로 다운로드한 뒤 메타데이터를 읽는다.
-- 아카라이브 URL 다운로드와 클립보드 이미지는 `%LOCALAPPDATA%\ComfyUI-EXIF-viewer\cache`에 저장된다.
-- 좌상단 `File` 메뉴에서 이미지 열기, 현재 탭 복사/저장, 캐시 삭제를 관리한다.
-- `File > Clear Cache`에서 최근 이미지 목록과 앱이 만든 다운로드 캐시를 지울 수 있다. 로컬 원본 이미지는 삭제하지 않는다.
-- 우측 탭에서 Prompt, Negative, Settings, Resources, Workflow, Raw를 분리해서 확인한다.
-- `Resources` 탭은 메타데이터에 확정 저장된 `Civitai resources`만 표시한다.
-- [`alexopus/ComfyUI-Image-Saver`](https://github.com/alexopus/ComfyUI-Image-Saver) 커스텀 노드 방식으로 저장된 리소스는 이름을 클릭해 `civitai.red`의 해당 모델 버전으로 연결할 수 있다.
-
-## 사용 예시
-
-### 워크플로우 프롬프트 추측
-
-![워크플로우 프롬프트 추측](image/%EC%B6%94%EC%B8%A1.png)
-
-ComfyUI 워크플로우만 있고 A1111/WebUI `parameters`가 없을 때 `Workflow prompt guess`를 켜면 첫 번째 활성 샘플러 기준으로 conditioning/text 입력을 역추적해 프롬프트를 보조적으로 추정한다. 일반 그래프뿐 아니라 ComfyUI Node 2.0 서브그래프도 확인한다.
-
-### Civitai 리소스 확인
-
-![ComfyUI Image Saver Civitai 리소스](image/image%20saver.png)
-
-[`alexopus/ComfyUI-Image-Saver`](https://github.com/alexopus/ComfyUI-Image-Saver)가 저장한 `Civitai resources` 메타데이터가 있으면 `Resources` 탭에서 사용된 리소스 이름, 버전, 가중치, AIR 값을 확인할 수 있다. 리소스 이름은 `civitai.red` 링크로 연결된다.
-
-## 워크플로우 프롬프트 추측
-
-A1111/WebUI `parameters`가 없는 ComfyUI 이미지에서만 보조적으로 사용한다.
-
-- 기본값은 OFF이며, 켜기 전에는 워크플로우 추적을 실행하지 않는다.
-- `Auto CLIP`: 첫 번째 활성 KSampler/Sampler의 `positive`/`negative` 입력에서 CLIPTextEncode, Context, pipe, text 노드를 역추적한다.
-- `Manual nodes`: Positive/Negative 노드 ID를 직접 입력한다. 여러 노드는 쉼표, 공백, 세미콜론으로 구분한다.
-- `Concat`: 여러 텍스트 노드를 합칠 때 사용할 구분자이다. `\n` 같은 escape 문자를 사용할 수 있다.
-- 추측 결과와 추적 정보는 `Guess` 탭에 표시된다.
-
-### 지원하는 노드 범위
-
-워크플로우 추측은 특정 커스텀 노드 이름만 대상으로 하지 않고, 저장된 ComfyUI API prompt/workflow 그래프의 노드 타입과 입력 이름을 기준으로 처리한다.
-
-- Sampler 계열: 타입 또는 클래스명에 `sampler`가 포함된 노드. `selector`, `config`는 제외하며 mute/bypass 상태를 구분한다. Sampler 이름의 Node 2.0 서브그래프 인스턴스도 확인한다.
-- CLIP/Text encode 계열: `CLIPTextEncode`, SDXL encoder, Wildcard encoder처럼 타입 또는 클래스명에 `textencode`가 포함된 노드.
-- Context/pipe 계열: 출력 포트와 출력 이름을 기준으로 `positive`, `negative`, `base_ctx`, `CONDITIONING+`, `CONDITIONING-`를 구분한다.
-- Text/String 노드: `caption`, `prompt`, `positive_prompt`, `negative_prompt`, `text_g`, `text_l`, `populated_text`, `wildcard_text`, `string`, `value` 등의 입력 값을 처리한다.
-- Text/String concat 계열: `text_1`뿐 아니라 Comfyroll 방식의 `text1`, `text2`도 인식하며 저장된 `separator`를 적용한다.
-- UI workflow: 배열형 링크와 Node 2.0 객체형 링크, `definitions.subgraphs`, `widgets_values`, `properties`를 처리한다.
-- Set/Get와 bypass: KJNodes Set/Get 이름을 따라가고 bypass 입력을 통과한다. 연결된 텍스트 입력이 있으면 변환 전의 오래된 위젯값은 사용하지 않는다.
-- 실행 결과 캐시: pysssss `ShowText`가 같은 출력 포트에 연결되어 있으면 워크플로우에 저장된 표시값을 우선 사용한다.
-
-동작 확인 범위에는 ComfyUI 기본 `CLIPTextEncode`/`KSampler`, rgthree Context, KJNodes Set/Get, Impact/Inspire Wildcard의 populated prompt, Efficiency Loader의 `CONDITIONING+/-`, Comfyroll Text Concatenate, pysssss ShowText, Node 2.0 서브그래프가 포함된다.
-
-이 기능은 저장된 그래프와 문자열을 이용하는 보조 추정이다. 실행 시점에만 생성되고 `prompt`, `workflow`, `ShowText` 등에 저장되지 않은 동적 문자열은 복원할 수 없다. 해당 경우 API prompt 메타데이터가 함께 저장된 이미지가 가장 정확하다.
-
-## 테스트
+전체 테스트:
 
 ```bat
-python -m unittest discover
+.venv\Scripts\python.exe -m unittest discover -s tests
 ```
+
+## 배경과 참고
+
+이 프로젝트의 이미지 드롭 영역과 프롬프트/옵션 분리 UI는 [`DCP-arca/NAI-Tag-Viewer`](https://github.com/DCP-arca/NAI-Tag-Viewer)를 참고했습니다. ComfyUI-Image-Saver가 JPEG/WEBP에 저장하는 EXIF `UserComment`까지 로컬에서 확인할 필요가 있어 PNG 중심 메타데이터 읽기 범위를 확장했습니다.
