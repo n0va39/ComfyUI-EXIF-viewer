@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import argparse
-import gzip
 import io
 import json
 import re
@@ -14,6 +13,9 @@ from typing import Any
 
 PNG_SIGNATURE = b"\x89PNG\r\n\x1a\n"
 JPEG_SIGNATURE = b"\xff\xd8"
+MAX_IMAGE_FILE_BYTES = 512 * 1024 * 1024
+MAX_METADATA_TEXT_BYTES = 16 * 1024 * 1024
+MAX_STEALTH_METADATA_BITS = MAX_METADATA_TEXT_BYTES * 8
 
 COMFY_KEYS = {"parameters", "prompt", "workflow"}
 KNOWN_TEXT_KEYS = {
@@ -99,6 +101,12 @@ class CivitaiResource:
 
 def read_metadata(path: str | Path) -> MetadataResult:
     image_path = Path(path)
+    file_size = image_path.stat().st_size
+    if file_size > MAX_IMAGE_FILE_BYTES:
+        raise ValueError(
+            "Image file exceeds the 512 MB safety limit: "
+            f"{file_size / (1024 * 1024):.1f} MB"
+        )
     data = image_path.read_bytes()
     warnings: list[str] = []
     entries: list[MetadataEntry] = []
@@ -347,6 +355,8 @@ def _read_info_from_image_stealth(image: Any) -> str | None:
                     reading_param = True
                     buffer_rgb = pop
                     index_rgb = 1
+                if param_len > MAX_STEALTH_METADATA_BITS:
+                    raise ValueError("Stealth metadata exceeds the 16 MB safety limit.")
             elif reading_param:
                 if mode == "alpha" and index_a == param_len:
                     binary_data = buffer_a
@@ -372,7 +382,9 @@ def _read_info_from_image_stealth(image: Any) -> str | None:
         int(binary_data[i : i + 8], 2) for i in range(0, len(binary_data), 8)
     )
     if compressed:
-        return gzip.decompress(byte_data).decode("utf-8")
+        return _decompress_metadata(byte_data, wbits=16 + zlib.MAX_WBITS).decode(
+            "utf-8"
+        )
     return byte_data.decode("utf-8", errors="ignore")
 
 
@@ -386,6 +398,8 @@ def _parse_png_text_chunk(chunk: bytes) -> tuple[str, str] | None:
     if b"\x00" not in chunk:
         return None
     key_raw, value_raw = chunk.split(b"\x00", 1)
+    if len(value_raw) > MAX_METADATA_TEXT_BYTES:
+        return None
     return _decode_png_key(key_raw), _decode_text(value_raw)
 
 
@@ -400,7 +414,9 @@ def _parse_png_ztxt_chunk(
         if compression_method != 0:
             warnings.append(f"Unsupported PNG zTXt compression method: {compression_method}")
             return None
-        return _decode_png_key(key_raw), _decode_text(zlib.decompress(rest[1:]))
+        return _decode_png_key(key_raw), _decode_text(
+            _decompress_metadata(rest[1:])
+        )
     except Exception as exc:
         warnings.append(f"Failed to read PNG zTXt chunk: {exc}")
         return None
@@ -423,11 +439,28 @@ def _parse_png_itxt_chunk(
                     f"Unsupported PNG iTXt compression method: {compression_method}"
                 )
                 return None
-            text_raw = zlib.decompress(text_raw)
+            text_raw = _decompress_metadata(text_raw)
+        elif len(text_raw) > MAX_METADATA_TEXT_BYTES:
+            raise ValueError("PNG iTXt metadata exceeds the 16 MB safety limit.")
         return _decode_png_key(key_raw), _decode_text(text_raw)
     except Exception as exc:
         warnings.append(f"Failed to read PNG iTXt chunk: {exc}")
         return None
+
+
+def _decompress_metadata(data: bytes, wbits: int = zlib.MAX_WBITS) -> bytes:
+    decompressor = zlib.decompressobj(wbits)
+    output_limit = MAX_METADATA_TEXT_BYTES + 1
+    output = decompressor.decompress(data, output_limit)
+    if len(output) > MAX_METADATA_TEXT_BYTES or decompressor.unconsumed_tail:
+        raise ValueError("Compressed metadata exceeds the 16 MB safety limit.")
+
+    output += decompressor.flush(output_limit - len(output))
+    if len(output) > MAX_METADATA_TEXT_BYTES:
+        raise ValueError("Compressed metadata exceeds the 16 MB safety limit.")
+    if not decompressor.eof:
+        raise ValueError("Compressed metadata stream is incomplete.")
+    return output
 
 
 def _read_webp_entries(data: bytes, warnings: list[str]) -> list[MetadataEntry]:

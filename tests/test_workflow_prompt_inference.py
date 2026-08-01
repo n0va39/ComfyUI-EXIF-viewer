@@ -90,6 +90,24 @@ class WorkflowPromptInferenceTests(unittest.TestCase):
         self.assertEqual(guess.negative, "first bad")
         self.assertIn("Sampler node: 8", guess.details)
 
+    def test_auto_clip_trace_handles_cyclic_sampler_graph(self) -> None:
+        prompt = {
+            "1": {
+                "class_type": "KSampler",
+                "inputs": {"model": ["2", 0], "positive": ["3", 0]},
+            },
+            "2": {
+                "class_type": "KSampler",
+                "inputs": {"model": ["1", 0]},
+            },
+            "3": {"class_type": "CLIPTextEncode", "inputs": {"text": "cat"}},
+        }
+
+        guess = infer_workflow_prompts("", json.dumps(prompt), "auto")
+
+        self.assertEqual(guess.positive, "cat")
+        self.assertIn("Sampler node: 1", guess.details)
+
     def test_auto_clip_trace_respects_context_output_index(self) -> None:
         prompt = {
             "6": {"class_type": "CLIPTextEncode", "inputs": {"text": "cat"}},

@@ -6,6 +6,7 @@ import tempfile
 import unittest
 import zlib
 from pathlib import Path
+from unittest import mock
 
 from comfy_metadata_reader import extract_civitai_resources, extract_sections, read_metadata
 
@@ -27,6 +28,19 @@ def make_png_with_text(key: str, value: str) -> bytes:
         b"\x89PNG\r\n\x1a\n"
         + png_chunk(b"IHDR", ihdr)
         + png_chunk(b"tEXt", text)
+        + png_chunk(b"IDAT", idat)
+        + png_chunk(b"IEND", b"")
+    )
+
+
+def make_png_with_ztxt(key: str, value: bytes) -> bytes:
+    ihdr = struct.pack(">IIBBBBB", 1, 1, 8, 2, 0, 0, 0)
+    idat = zlib.compress(b"\x00\x00\x00\x00")
+    text = key.encode("latin-1") + b"\x00\x00" + zlib.compress(value)
+    return (
+        b"\x89PNG\r\n\x1a\n"
+        + png_chunk(b"IHDR", ihdr)
+        + png_chunk(b"zTXt", text)
         + png_chunk(b"IDAT", idat)
         + png_chunk(b"IEND", b"")
     )
@@ -117,6 +131,29 @@ class MetadataReaderTests(unittest.TestCase):
 
         self.assertEqual(result.format_name, "PNG")
         self.assertEqual(result.first_value("parameters"), "cat\nSteps: 20")
+
+    def test_rejects_compressed_png_metadata_over_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "compressed.png"
+            path.write_bytes(make_png_with_ztxt("parameters", b"A" * 128))
+
+            with mock.patch("comfy_metadata_reader.MAX_METADATA_TEXT_BYTES", 64):
+                result = read_metadata(path)
+
+        self.assertEqual(result.first_value("parameters"), "")
+        self.assertTrue(
+            any("safety limit" in warning for warning in result.warnings),
+            result.warnings,
+        )
+
+    def test_rejects_image_file_over_limit(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "oversized.png"
+            path.write_bytes(b"\x89PNG\r\n\x1a\n")
+
+            with mock.patch("comfy_metadata_reader.MAX_IMAGE_FILE_BYTES", 4):
+                with self.assertRaisesRegex(ValueError, "512 MB safety limit"):
+                    read_metadata(path)
 
     def test_reads_webp_exif_user_comment_and_comfy_aliases(self) -> None:
         comment = "cat\nNegative prompt: dog\nSteps: 20, Seed: 123"

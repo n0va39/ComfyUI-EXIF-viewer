@@ -14,6 +14,7 @@ import urllib.request
 import webbrowser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
+from typing import Any
 
 try:
     from PIL import Image, ImageGrab, ImageOps, ImageTk
@@ -56,6 +57,7 @@ ALLOWED_DROP_URL_HOSTS = {"ac-o.namu.la"}
 APP_DIR_NAME = "ComfyUI-EXIF-viewer"
 RECENT_CACHE_FILENAME = "recent_images.json"
 MAX_RECENT_IMAGES = 8
+APP_VERSION = "0.1.4"
 PREVIEW_PANEL_MIN_WIDTH = 760
 RECENT_PANEL_MIN_WIDTH = 220
 LEFT_REGION_MIN_WIDTH = PREVIEW_PANEL_MIN_WIDTH + RECENT_PANEL_MIN_WIDTH + 18
@@ -1081,35 +1083,41 @@ class MetadataViewer(BaseTk):
                 )
             },
         )
-        with urllib.request.urlopen(request, timeout=20) as response:
+        with _open_allowed_drop_url(request) as response:
+            final_url = response.geturl()
+            if not _is_allowed_drop_url(final_url):
+                raise ValueError("Image URL redirected outside the allowed host.")
             content_type = response.headers.get("Content-Type", "").split(";", 1)[0]
             content_length = response.headers.get("Content-Length")
             if content_length and int(content_length) > MAX_DROP_DOWNLOAD_BYTES:
                 raise ValueError("Dropped image URL is too large.")
 
-            suffix = _suffix_from_url_or_content_type(url, content_type)
+            suffix = _suffix_from_url_or_content_type(final_url, content_type)
             if suffix not in SUPPORTED_SUFFIXES:
                 raise ValueError("Dropped URL does not look like a supported image.")
 
             total_bytes = int(content_length) if content_length else None
-            chunks = []
+            temp_dir = _app_cache_dir()
+            temp_dir.mkdir(parents=True, exist_ok=True)
+            digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+            path = temp_dir / f"chrome-drop-{digest}{suffix}"
+            partial_path = path.with_name(path.name + ".part")
             received_bytes = 0
-            while True:
-                chunk = response.read(DROP_DOWNLOAD_CHUNK_BYTES)
-                if not chunk:
-                    break
-                chunks.append(chunk)
-                received_bytes += len(chunk)
-                if received_bytes > MAX_DROP_DOWNLOAD_BYTES:
-                    raise ValueError("Dropped image URL is too large.")
-                self._queue_download_progress(received_bytes, total_bytes)
-            data = b"".join(chunks)
-
-        temp_dir = _app_cache_dir()
-        temp_dir.mkdir(parents=True, exist_ok=True)
-        digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
-        path = temp_dir / f"chrome-drop-{digest}{suffix}"
-        path.write_bytes(data)
+            try:
+                with partial_path.open("wb") as output:
+                    while True:
+                        chunk = response.read(DROP_DOWNLOAD_CHUNK_BYTES)
+                        if not chunk:
+                            break
+                        received_bytes += len(chunk)
+                        if received_bytes > MAX_DROP_DOWNLOAD_BYTES:
+                            raise ValueError("Dropped image URL is too large.")
+                        output.write(chunk)
+                        self._queue_download_progress(received_bytes, total_bytes)
+                partial_path.replace(path)
+            except Exception:
+                partial_path.unlink(missing_ok=True)
+                raise
         return path
 
     def _show_download_progress(self) -> None:
@@ -1217,6 +1225,26 @@ def _suffix_from_url_or_content_type(url: str, content_type: str) -> str:
         "image/jpeg": ".jpg",
         "image/jpg": ".jpg",
     }.get(content_type.lower(), "")
+
+
+class _AllowedDropRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def redirect_request(
+        self,
+        req: urllib.request.Request,
+        fp: Any,
+        code: int,
+        msg: str,
+        headers: Any,
+        newurl: str,
+    ) -> urllib.request.Request | None:
+        if not _is_allowed_drop_url(newurl):
+            raise ValueError("Image URL redirected outside the allowed host.")
+        return super().redirect_request(req, fp, code, msg, headers, newurl)
+
+
+def _open_allowed_drop_url(request: urllib.request.Request) -> Any:
+    opener = urllib.request.build_opener(_AllowedDropRedirectHandler())
+    return opener.open(request, timeout=20)
 
 
 def _is_allowed_drop_url(url: str) -> bool:
@@ -1346,6 +1374,7 @@ def _mix_hex(first: str, second: str, ratio: float) -> str:
 
 def main() -> int:
     parser = argparse.ArgumentParser(description="ComfyUI EXIF metadata viewer.")
+    parser.add_argument("--version", action="version", version=f"%(prog)s {APP_VERSION}")
     parser.add_argument("image", nargs="?", help="Optional image path to open")
     parser.add_argument(
         "--dump",
