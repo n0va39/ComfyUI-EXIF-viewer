@@ -12,4 +12,6 @@ Include the affected version, input file or minimal reproduction, expected impac
 
 ## Release integrity
 
-Official Windows binaries are published only through this repository's GitHub Releases. Each release must include a SHA-256 checksum. A valid Authenticode signature should also be verified when the release is marked as signed.
+Official Windows binaries are published only through this repository's GitHub Releases. Each release must include a SHA-256 checksum. A release marked as signed must have a valid Authenticode signature and follow the repository [Code signing policy](CODE_SIGNING_POLICY.md).
+
+The project is preparing a SignPath Foundation application. Existing releases remain unsigned unless their Authenticode signature proves otherwise.
