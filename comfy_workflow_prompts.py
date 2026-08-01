@@ -360,23 +360,30 @@ def _first_api_sampler_id(api: dict[str, Any]) -> str:
         return ""
 
     upstream_cache: dict[str, set[str]] = {}
+    visiting: set[str] = set()
 
     def upstream(node_id: str) -> set[str]:
         if node_id in upstream_cache:
             return upstream_cache[node_id]
+        if node_id in visiting:
+            return set()
         node = api.get(node_id)
         if not isinstance(node, dict):
             upstream_cache[node_id] = set()
             return set()
+        visiting.add(node_id)
         result: set[str] = set()
-        inputs = node.get("inputs")
-        if isinstance(inputs, dict):
-            for value in inputs.values():
-                for source_id in _connected_node_ids(value):
-                    if source_id in result:
-                        continue
-                    result.add(source_id)
-                    result.update(upstream(source_id))
+        try:
+            inputs = node.get("inputs")
+            if isinstance(inputs, dict):
+                for value in inputs.values():
+                    for source_id in _connected_node_ids(value):
+                        if source_id in result:
+                            continue
+                        result.add(source_id)
+                        result.update(upstream(source_id))
+        finally:
+            visiting.remove(node_id)
         upstream_cache[node_id] = result
         return result
 

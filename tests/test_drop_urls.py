@@ -4,9 +4,12 @@ import os
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 from comfy_exif_viewer import (
+    _AllowedDropRedirectHandler,
     MAX_RECENT_IMAGES,
+    MetadataViewer,
     _app_cache_dir,
     _clear_app_cache_files,
     _format_bytes,
@@ -16,6 +19,36 @@ from comfy_exif_viewer import (
     _save_recent_paths,
     _suffix_from_url_or_content_type,
 )
+
+
+class _FakeResponse:
+    def __init__(self, final_url: str, payload: bytes) -> None:
+        self.final_url = final_url
+        self.payload = payload
+        self.offset = 0
+        self.headers = {
+            "Content-Type": "image/png",
+            "Content-Length": str(len(payload)),
+        }
+
+    def __enter__(self) -> "_FakeResponse":
+        return self
+
+    def __exit__(self, _exc_type: object, _exc: object, _traceback: object) -> None:
+        return None
+
+    def geturl(self) -> str:
+        return self.final_url
+
+    def read(self, size: int) -> bytes:
+        chunk = self.payload[self.offset : self.offset + size]
+        self.offset += len(chunk)
+        return chunk
+
+
+class _DownloadOwner:
+    def _queue_download_progress(self, _received: int, _total: int | None) -> None:
+        return None
 
 
 class DropUrlTests(unittest.TestCase):
@@ -57,6 +90,50 @@ class DropUrlTests(unittest.TestCase):
         self.assertEqual(_format_bytes(100), "100 B")
         self.assertEqual(_format_bytes(1536), "1.5 KB")
         self.assertEqual(_format_bytes(2 * 1024 * 1024), "2.0 MB")
+
+    def test_rejects_redirect_outside_allowed_host(self) -> None:
+        response = _FakeResponse("https://example.com/image.png", b"png")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with _temporary_local_app_data(temp_dir):
+                with mock.patch(
+                    "comfy_exif_viewer._open_allowed_drop_url",
+                    return_value=response,
+                ):
+                    with self.assertRaisesRegex(ValueError, "redirected outside"):
+                        MetadataViewer._download_image_url(
+                            _DownloadOwner(),
+                            "https://ac-o.namu.la/image.png",
+                        )
+
+    def test_streams_allowed_download_to_app_cache(self) -> None:
+        payload = b"png-payload"
+        response = _FakeResponse("https://ac-o.namu.la/image.png", payload)
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with _temporary_local_app_data(temp_dir):
+                with mock.patch(
+                    "comfy_exif_viewer._open_allowed_drop_url",
+                    return_value=response,
+                ):
+                    path = MetadataViewer._download_image_url(
+                        _DownloadOwner(),
+                        "https://ac-o.namu.la/image.png",
+                    )
+
+                self.assertEqual(path.read_bytes(), payload)
+                self.assertFalse(path.with_name(path.name + ".part").exists())
+
+    def test_rejects_each_redirect_hop_outside_allowed_host(self) -> None:
+        handler = _AllowedDropRedirectHandler()
+
+        with self.assertRaisesRegex(ValueError, "redirected outside"):
+            handler.redirect_request(
+                mock.Mock(),
+                mock.Mock(),
+                302,
+                "Found",
+                {},
+                "https://example.com/intermediate.png",
+            )
 
     def test_persists_existing_recent_paths_only(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
