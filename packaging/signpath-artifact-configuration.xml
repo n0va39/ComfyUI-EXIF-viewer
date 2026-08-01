@@ -1,0 +1,21 @@
+<?xml version="1.0" encoding="utf-8"?>
+<artifact-configuration xmlns="http://signpath.io/artifact-configuration/v1">
+  <parameters>
+    <parameter name="version" required="true" />
+    <parameter name="fileVersion" required="true" />
+  </parameters>
+  <zip-file>
+    <pe-file
+      path="ComfyUI-EXIF-viewer.exe"
+      product-name="ComfyUI EXIF Viewer"
+      product-version="${version}"
+      file-version="${fileVersion}"
+      company-name="n0va39"
+      copyright="Copyright (c) 2026 n0va39"
+      original-filename="ComfyUI-EXIF-viewer.exe">
+      <authenticode-sign
+        description="ComfyUI EXIF Viewer"
+        description-url="https://github.com/n0va39/ComfyUI-EXIF-viewer" />
+    </pe-file>
+  </zip-file>
+</artifact-configuration>

@@ -12,6 +12,8 @@ ComfyUI, A1111/WebUI, NovelAI 이미지에 저장된 프롬프트와 생성 설�
 
 여러 파일이나 지원 URL을 한 번에 드롭하면 대기열에 추가되어 순서대로 열립니다. 드롭 영역을 선택한 뒤 `Ctrl+V`를 누르면 로컬 파일 경로, 이미지 URL 또는 클립보드 이미지도 열 수 있습니다.
 
+설치 프로그램, 서비스, 시작 프로그램 또는 레지스트리 설정을 추가하지 않는 휴대용 앱입니다. 제거하려면 필요에 따라 `File > Clear Cache`를 실행한 뒤 EXE를 삭제하세요. 남은 앱 데이터는 `%LOCALAPPDATA%\ComfyUI-EXIF-viewer` 폴더를 직접 삭제할 수 있습니다.
+
 ## 주요 기능
 
 - PNG, WEBP, JPEG에 저장된 ComfyUI/A1111/NovelAI 메타데이터 표시
@@ -55,6 +57,12 @@ ComfyUI, A1111/WebUI, NovelAI 이미지에 저장된 프롬프트와 생성 설�
 - 이미지 파일은 512 MB, 압축 해제된 단일 메타데이터 항목은 16 MB로 제한합니다.
 - 공식 Windows 바이너리는 GitHub Releases에서만 배포하고 릴리스의 SHA-256과 대조합니다.
 - 저장 데이터와 네트워크 동작은 [PRIVACY.md](PRIVACY.md), 취약점 신고 절차는 [SECURITY.md](SECURITY.md)를 참고하세요.
+
+## Code signing policy
+
+Free code signing provided by [SignPath.io](https://about.signpath.io/), certificate by [SignPath Foundation](https://signpath.org/).
+
+현재 SignPath Foundation 신청을 준비하고 있습니다. 승인 전 바이너리는 유효한 Authenticode 서명이 확인되지 않는 한 무서명으로 취급해야 합니다. 역할, 빌드 출처 검증, 수동 승인과 릴리스 조건은 [CODE_SIGNING_POLICY.md](CODE_SIGNING_POLICY.md)를 참고하세요.
 
 ## 워크플로우 프롬프트 추측
 
@@ -102,7 +110,7 @@ ComfyUI `workflow` 또는 API `prompt`는 있지만 A1111/WebUI `parameters`가 
 run_viewer.bat
 ```
 
-`run_viewer.bat`은 `.venv`를 우선 사용하며 필요한 패키지가 없으면 `requirements.txt`를 설치합니다. 특정 이미지를 바로 열 수도 있습니다.
+`run_viewer.bat`은 `.venv`를 우선 사용하며 필요한 패키지가 없으면 해시가 고정된 `requirements.lock`을 설치합니다. 특정 이미지를 바로 열 수도 있습니다.
 
 ```bat
 run_viewer.bat "C:\path\to\image.webp"
@@ -134,7 +142,7 @@ $env:CODE_SIGN_TIMESTAMP_URL = "https://timestamp.example.com"
 .\scripts\build_windows.ps1
 ```
 
-서명 변수가 없으면 로컬 테스트용 무서명 EXE를 만들고 경고를 출력합니다. 공개 릴리스에는 서명된 EXE 또는 Microsoft Store의 서명된 MSIX를 사용하세요.
+서명 변수가 없으면 로컬 테스트용 무서명 EXE를 만들고 경고를 출력합니다. SignPath 승인 후 공식 서명 후보는 버전 태그에서만 실행되는 `Signed Release Candidate` 워크플로로 만들며, 워크플로 자체는 GitHub Release를 발행하지 않습니다. 신청과 최초 설정 절차는 [SignPath Foundation 설정 가이드](docs/SIGNPATH_SETUP.md)를 참고하세요.
 
 잠금 파일 갱신:
 
