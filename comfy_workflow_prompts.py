@@ -664,29 +664,36 @@ def _first_ui_sampler_id(ui: dict[str, Any]) -> str:
         return ""
 
     upstream_cache: dict[str, set[str]] = {}
+    visiting: set[str] = set()
 
     def upstream(node_id: str) -> set[str]:
         if node_id in upstream_cache:
             return upstream_cache[node_id]
+        if node_id in visiting:
+            return set()
         node = nodes.get(node_id)
         if not node:
             upstream_cache[node_id] = set()
             return set()
+        visiting.add(node_id)
         result: set[str] = set()
-        inputs = node.get("inputs")
-        if isinstance(inputs, list):
-            for item in inputs:
-                if not isinstance(item, dict) or item.get("link") is None:
-                    continue
-                try:
-                    source_ref = link_sources.get(int(item["link"]))
-                except (TypeError, ValueError):
-                    source_ref = None
-                source_id = source_ref.node_id if source_ref else None
-                if not source_id or source_id in result:
-                    continue
-                result.add(source_id)
-                result.update(upstream(source_id))
+        try:
+            inputs = node.get("inputs")
+            if isinstance(inputs, list):
+                for item in inputs:
+                    if not isinstance(item, dict) or item.get("link") is None:
+                        continue
+                    try:
+                        source_ref = link_sources.get(int(item["link"]))
+                    except (TypeError, ValueError):
+                        source_ref = None
+                    source_id = source_ref.node_id if source_ref else None
+                    if not source_id or source_id in result:
+                        continue
+                    result.add(source_id)
+                    result.update(upstream(source_id))
+        finally:
+            visiting.remove(node_id)
         upstream_cache[node_id] = result
         return result
 
