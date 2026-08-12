@@ -15,6 +15,8 @@ import tkinter.font as tkfont
 import urllib.parse
 import urllib.request
 import webbrowser
+from dataclasses import dataclass
+from html.parser import HTMLParser
 from pathlib import Path
 from tkinter import filedialog, messagebox, ttk
 from typing import Any
@@ -28,6 +30,7 @@ except ImportError:
     ImageTk = None
 
 from comfy_metadata_reader import (
+    MetadataEntry,
     MetadataResult,
     extract_civitai_resources,
     extract_sections,
@@ -56,12 +59,23 @@ SUPPORTED_FILETYPES = (
 SUPPORTED_SUFFIXES = {".png", ".webp", ".jpg", ".jpeg"}
 MAX_DROP_DOWNLOAD_BYTES = 100 * 1024 * 1024
 DROP_DOWNLOAD_CHUNK_BYTES = 256 * 1024
-DEFAULT_ALLOWED_DROP_URL_HOSTS = ("ac-o.namu.la",)
+MAX_CIVITAI_PAGE_BYTES = 8 * 1024 * 1024
+CIVITAI_PAGE_HOSTS = frozenset({"civitai.com", "civitai.red"})
+CIVITAI_IMAGE_HOST = "image.civitai.com"
+CIVITAI_DELIVERY_HOST = "image-b2.civitai.com"
+DEFAULT_ALLOWED_DROP_URL_HOSTS = (
+    "ac-o.namu.la",
+    "civitai.com",
+    "civitai.red",
+    CIVITAI_IMAGE_HOST,
+    CIVITAI_DELIVERY_HOST,
+)
 APP_DIR_NAME = "ComfyUI-EXIF-viewer"
 RECENT_CACHE_FILENAME = "recent_images.json"
 SETTINGS_FILENAME = "settings.json"
+SETTINGS_SCHEMA_VERSION = 2
 MAX_RECENT_IMAGES = 8
-APP_VERSION = "0.1.4"
+APP_VERSION = "0.1.5"
 PREVIEW_PANEL_MIN_WIDTH = 760
 RECENT_PANEL_MIN_WIDTH = 220
 LEFT_REGION_MIN_WIDTH = PREVIEW_PANEL_MIN_WIDTH + RECENT_PANEL_MIN_WIDTH + 18
@@ -83,6 +97,18 @@ def enable_high_dpi_awareness() -> None:
 
 
 BaseTk = TkinterDnD.Tk if TkinterDnD is not None else tk.Tk
+
+
+@dataclass(frozen=True)
+class _CivitaiImageInfo:
+    image_url: str
+    metadata_entries: tuple[MetadataEntry, ...]
+
+
+@dataclass(frozen=True)
+class _DownloadedImage:
+    path: Path
+    supplemental_entries: tuple[MetadataEntry, ...] = ()
 
 
 class MetadataViewer(BaseTk):
@@ -692,13 +718,21 @@ class MetadataViewer(BaseTk):
         if selected:
             self.open_path(selected)
 
-    def open_path(self, path: str | Path, *, from_queue: bool = False) -> None:
+    def open_path(
+        self,
+        path: str | Path,
+        *,
+        from_queue: bool = False,
+        supplemental_entries: tuple[MetadataEntry, ...] = (),
+    ) -> None:
         try:
             result = read_metadata(path)
         except Exception as exc:
             messagebox.showerror("Read failed", str(exc))
             return
 
+        if supplemental_entries:
+            result.entries.extend(supplemental_entries)
         if not from_queue:
             self._supersede_drop_navigation()
         self.current_result = result
@@ -1159,14 +1193,17 @@ class MetadataViewer(BaseTk):
         allowed_hosts: frozenset[str] | None = None,
     ) -> None:
         try:
-            path = self._download_image_url(url, generation, allowed_hosts)
+            downloaded = self._download_image_url(url, generation, allowed_hosts)
         except Exception as exc:
             self.download_events.put(("finished", generation, None, str(exc)))
             return
-        self.download_events.put(("finished", generation, path, ""))
+        self.download_events.put(("finished", generation, downloaded, ""))
 
     def _finish_url_download(
-        self, path: Path | None, error: str, generation: int
+        self,
+        downloaded: _DownloadedImage | Path | None,
+        error: str,
+        generation: int,
     ) -> None:
         self.download_thread = None
         self.drop_frame.configure(cursor="")
@@ -1186,8 +1223,14 @@ class MetadataViewer(BaseTk):
             if self.processing_drop_queue:
                 self.after(0, self._process_next_drop_queue_item)
             return
-        if path is not None:
-            self.open_path(path, from_queue=True)
+        if downloaded is not None:
+            if isinstance(downloaded, Path):
+                downloaded = _DownloadedImage(downloaded)
+            self.open_path(
+                downloaded.path,
+                from_queue=True,
+                supplemental_entries=downloaded.supplemental_entries,
+            )
         if self.processing_drop_queue:
             self.after(0, self._process_next_drop_queue_item)
 
@@ -1201,13 +1244,44 @@ class MetadataViewer(BaseTk):
         url: str,
         generation: int | None = None,
         allowed_hosts: frozenset[str] | None = None,
-    ) -> Path:
+    ) -> _DownloadedImage:
         if allowed_hosts is None:
             allowed_hosts = frozenset(
                 getattr(self, "allowed_url_hosts", DEFAULT_ALLOWED_DROP_URL_HOSTS)
             )
         if not _is_allowed_drop_url(url, allowed_hosts):
             raise ValueError("Image URL hostname is not allowed in settings.")
+
+        source_url = url
+        supplemental_entries: tuple[MetadataEntry, ...] = ()
+        hostname = _url_hostname(url)
+        if hostname in CIVITAI_PAGE_HOSTS:
+            civitai_info = _resolve_civitai_image_page(url, allowed_hosts)
+            url = civitai_info.image_url
+            supplemental_entries = civitai_info.metadata_entries
+            if not _is_allowed_drop_url(url, allowed_hosts):
+                raise ValueError(
+                    "Civitai image delivery requires image.civitai.com in "
+                    "Settings > Allowed Image Sites."
+                )
+        elif hostname == CIVITAI_IMAGE_HOST:
+            image_id = _civitai_asset_image_id(url)
+            url = _civitai_original_asset_url(url)
+            canonical_page = (
+                f"https://civitai.com/images/{image_id}" if image_id else ""
+            )
+            if canonical_page and _is_allowed_drop_url(canonical_page, allowed_hosts):
+                try:
+                    civitai_info = _resolve_civitai_image_page(
+                        canonical_page, allowed_hosts
+                    )
+                except (OSError, ValueError):
+                    supplemental_entries = ()
+                else:
+                    source_asset = _civitai_asset_key(url)
+                    resolved_asset = _civitai_asset_key(civitai_info.image_url)
+                    if source_asset and source_asset == resolved_asset:
+                        supplemental_entries = civitai_info.metadata_entries
 
         request = urllib.request.Request(
             url,
@@ -1234,7 +1308,7 @@ class MetadataViewer(BaseTk):
             total_bytes = int(content_length) if content_length else None
             temp_dir = _app_cache_dir()
             temp_dir.mkdir(parents=True, exist_ok=True)
-            digest = hashlib.sha256(url.encode("utf-8")).hexdigest()[:16]
+            digest = hashlib.sha256(source_url.encode("utf-8")).hexdigest()[:16]
             path = temp_dir / f"chrome-drop-{digest}{suffix}"
             partial_path = path.with_name(path.name + ".part")
             received_bytes = 0
@@ -1255,7 +1329,7 @@ class MetadataViewer(BaseTk):
             except Exception:
                 partial_path.unlink(missing_ok=True)
                 raise
-        return path
+        return _DownloadedImage(path, supplemental_entries)
 
     def _show_download_progress(self) -> None:
         self.download_progress.stop()
@@ -1378,6 +1452,288 @@ class MetadataViewer(BaseTk):
         self.drop_label.configure(image=photo, text=label, compound=tk.TOP)
 
 
+class _CivitaiScriptParser(HTMLParser):
+    def __init__(self) -> None:
+        super().__init__()
+        self._capture: str | None = None
+        self._parts: list[str] = []
+        self.json_ld_scripts: list[str] = []
+        self.next_data_script = ""
+
+    def handle_starttag(
+        self, tag: str, attrs: list[tuple[str, str | None]]
+    ) -> None:
+        if tag.lower() != "script":
+            return
+        values = dict(attrs)
+        if values.get("id") == "__NEXT_DATA__":
+            self._capture = "next"
+        elif values.get("type") == "application/ld+json":
+            self._capture = "json-ld"
+        else:
+            return
+        self._parts = []
+
+    def handle_data(self, data: str) -> None:
+        if self._capture is not None:
+            self._parts.append(data)
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.lower() != "script" or self._capture is None:
+            return
+        value = "".join(self._parts)
+        if self._capture == "next":
+            self.next_data_script = value
+        else:
+            self.json_ld_scripts.append(value)
+        self._capture = None
+        self._parts = []
+
+
+def _url_hostname(url: str) -> str:
+    try:
+        return _normalize_allowed_url_host(
+            urllib.parse.urlparse(url).hostname or ""
+        )
+    except ValueError:
+        return ""
+
+
+def _civitai_image_page_id(url: str) -> int | None:
+    parsed = urllib.parse.urlparse(url)
+    if parsed.scheme != "https" or _url_hostname(url) not in CIVITAI_PAGE_HOSTS:
+        return None
+    match = re.fullmatch(r"/images/(\d+)/?", parsed.path)
+    return int(match.group(1)) if match else None
+
+
+def _civitai_asset_image_id(url: str) -> int | None:
+    if _url_hostname(url) != CIVITAI_IMAGE_HOST:
+        return None
+    stem = Path(urllib.parse.urlparse(url).path).stem
+    return int(stem) if stem.isdigit() else None
+
+
+def _civitai_asset_key(url: str) -> str:
+    match = re.search(
+        r"/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?:/|$)",
+        urllib.parse.urlparse(url).path,
+        flags=re.IGNORECASE,
+    )
+    return match.group(0).strip("/").lower() if match else ""
+
+
+def _civitai_original_asset_url(url: str) -> str:
+    if _url_hostname(url) != CIVITAI_IMAGE_HOST:
+        return url
+    parsed = urllib.parse.urlparse(url)
+    segments = parsed.path.split("/")
+    asset_index = next(
+        (
+            index
+            for index, segment in enumerate(segments)
+            if re.fullmatch(
+                r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}",
+                segment,
+                flags=re.IGNORECASE,
+            )
+        ),
+        None,
+    )
+    if asset_index is None or asset_index + 1 >= len(segments):
+        return url
+    filename = segments[-1]
+    if not filename:
+        return url
+    original_path = "/".join(
+        [*segments[: asset_index + 1], "original=true", filename]
+    )
+    return urllib.parse.urlunparse(parsed._replace(path=original_path))
+
+
+def _read_limited_response(response: Any, maximum: int, label: str) -> bytes:
+    content_length = response.headers.get("Content-Length")
+    if content_length:
+        try:
+            declared_length = int(content_length)
+        except ValueError:
+            declared_length = None
+        if declared_length is not None and declared_length > maximum:
+            raise ValueError(f"{label} is too large.")
+    payload = response.read(maximum + 1)
+    if len(payload) > maximum:
+        raise ValueError(f"{label} is too large.")
+    return payload
+
+
+def _resolve_civitai_image_page(
+    url: str,
+    allowed_hosts: frozenset[str],
+) -> _CivitaiImageInfo:
+    image_id = _civitai_image_page_id(url)
+    if image_id is None:
+        raise ValueError("Civitai URLs must use /images/<numeric-id>.")
+
+    canonical_url = f"https://civitai.com/images/{image_id}"
+    if not _is_allowed_drop_url(canonical_url, allowed_hosts):
+        raise ValueError(
+            "Resolving civitai.red links requires civitai.com in "
+            "Settings > Allowed Image Sites."
+        )
+    request = urllib.request.Request(
+        canonical_url,
+        headers={
+            "User-Agent": "Mozilla/5.0 ComfyUI-EXIF-viewer (image metadata)",
+            "Accept": "text/html,application/xhtml+xml",
+        },
+    )
+    with _open_allowed_drop_url(request, allowed_hosts) as response:
+        final_url = response.geturl()
+        if _civitai_image_page_id(final_url) != image_id:
+            raise ValueError("Civitai image page redirected unexpectedly.")
+        content_type = response.headers.get("Content-Type", "").lower()
+        if "text/html" not in content_type:
+            raise ValueError("Civitai image page did not return HTML.")
+        source = _read_limited_response(
+            response, MAX_CIVITAI_PAGE_BYTES, "Civitai image page"
+        ).decode("utf-8", errors="replace")
+    return _parse_civitai_image_page(source, image_id)
+
+
+def _parse_civitai_image_page(source: str, image_id: int) -> _CivitaiImageInfo:
+    parser = _CivitaiScriptParser()
+    parser.feed(source)
+
+    image_url = ""
+    for script in parser.json_ld_scripts:
+        try:
+            payload = json.loads(script)
+        except json.JSONDecodeError:
+            continue
+        image_object = _find_civitai_image_object(payload)
+        if image_object is None:
+            continue
+        candidate = str(image_object.get("contentUrl") or "")
+        if (
+            urllib.parse.urlparse(candidate).scheme == "https"
+            and _url_hostname(candidate) == CIVITAI_IMAGE_HOST
+        ):
+            image_url = candidate
+            break
+    if not image_url:
+        raise ValueError("Civitai page did not expose an original image URL.")
+
+    metadata: dict[str, Any] = {}
+    if parser.next_data_script:
+        try:
+            next_data = json.loads(parser.next_data_script)
+        except json.JSONDecodeError:
+            next_data = {}
+        metadata = _find_civitai_page_metadata(next_data, image_id)
+
+    return _CivitaiImageInfo(
+        image_url=image_url,
+        metadata_entries=_civitai_metadata_entries(metadata),
+    )
+
+
+def _find_civitai_image_object(value: Any) -> dict[str, Any] | None:
+    if isinstance(value, dict):
+        if value.get("@type") == "ImageObject" and value.get("contentUrl"):
+            return value
+        for item in value.values():
+            result = _find_civitai_image_object(item)
+            if result is not None:
+                return result
+    elif isinstance(value, list):
+        for item in value:
+            result = _find_civitai_image_object(item)
+            if result is not None:
+                return result
+    return None
+
+
+def _find_civitai_page_metadata(value: Any, image_id: int) -> dict[str, Any]:
+    fallback: dict[str, Any] = {}
+
+    def visit(item: Any) -> dict[str, Any] | None:
+        nonlocal fallback
+        if isinstance(item, dict):
+            state = item.get("state")
+            data = state.get("data") if isinstance(state, dict) else None
+            if isinstance(data, dict) and data.get("type") == "image":
+                meta = data.get("meta")
+                if isinstance(meta, dict):
+                    if not fallback:
+                        fallback = meta
+                    if _contains_value(item.get("queryKey"), image_id):
+                        return meta
+            for child in item.values():
+                result = visit(child)
+                if result is not None:
+                    return result
+        elif isinstance(item, list):
+            for child in item:
+                result = visit(child)
+                if result is not None:
+                    return result
+        return None
+
+    return visit(value) or fallback
+
+
+def _contains_value(value: Any, expected: int) -> bool:
+    if value == expected:
+        return True
+    if isinstance(value, dict):
+        return any(_contains_value(item, expected) for item in value.values())
+    if isinstance(value, list):
+        return any(_contains_value(item, expected) for item in value)
+    return False
+
+
+def _civitai_metadata_entries(
+    metadata: dict[str, Any],
+) -> tuple[MetadataEntry, ...]:
+    if not metadata:
+        return ()
+    entries: list[MetadataEntry] = []
+    prompt = metadata.get("prompt")
+    negative_prompt = metadata.get("negativePrompt")
+    if isinstance(prompt, str) and prompt.strip():
+        entries.append(MetadataEntry("Civitai", "prompt", prompt.strip()))
+    if isinstance(negative_prompt, str) and negative_prompt.strip():
+        entries.append(
+            MetadataEntry("Civitai", "negative_prompt", negative_prompt.strip())
+        )
+
+    settings: list[str] = []
+    for label, key in (
+        ("Steps", "steps"),
+        ("Sampler", "sampler"),
+        ("CFG scale", "cfgScale"),
+        ("Seed", "seed"),
+        ("Model", "Model"),
+    ):
+        value = metadata.get(key)
+        if value is not None and value != "":
+            settings.append(f"{label}: {value}")
+    width = metadata.get("width")
+    height = metadata.get("height")
+    if width and height:
+        settings.append(f"Size: {width}x{height}")
+    if settings:
+        entries.append(MetadataEntry("Civitai", "settings", "\n".join(settings)))
+    entries.append(
+        MetadataEntry(
+            "Civitai",
+            "metadata",
+            json.dumps(metadata, ensure_ascii=False, indent=2),
+        )
+    )
+    return tuple(entries)
+
+
 def _suffix_from_url_or_content_type(url: str, content_type: str) -> str:
     suffix = Path(urllib.parse.urlparse(url).path).suffix.lower()
     if suffix in SUPPORTED_SUFFIXES:
@@ -1446,6 +1802,8 @@ def _is_supported_drop_item(
 ) -> bool:
     parsed = urllib.parse.urlparse(item)
     if _is_allowed_drop_url(item, allowed_hosts):
+        if _url_hostname(item) in CIVITAI_PAGE_HOSTS:
+            return _civitai_image_page_id(item) is not None
         return True
     if parsed.scheme in {"http", "https"}:
         return False
@@ -1553,7 +1911,10 @@ def _load_allowed_url_hosts() -> frozenset[str]:
             isinstance(item, str) for item in values
         ):
             raise ValueError("allowed_image_hosts is not a string list")
-        return _parse_allowed_url_hosts("\n".join(values))
+        hosts = _parse_allowed_url_hosts("\n".join(values))
+        if payload.get("version", 1) == 1 and hosts == frozenset({"ac-o.namu.la"}):
+            return frozenset(DEFAULT_ALLOWED_DROP_URL_HOSTS)
+        return hosts
     except (OSError, ValueError, json.JSONDecodeError):
         return frozenset(DEFAULT_ALLOWED_DROP_URL_HOSTS)
 
@@ -1562,7 +1923,10 @@ def _save_allowed_url_hosts(hosts: frozenset[str]) -> None:
     path = _settings_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     temporary_path = path.with_name(path.name + ".tmp")
-    payload = {"allowed_image_hosts": sorted(hosts)}
+    payload = {
+        "version": SETTINGS_SCHEMA_VERSION,
+        "allowed_image_hosts": sorted(hosts),
+    }
     try:
         temporary_path.write_text(
             json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"

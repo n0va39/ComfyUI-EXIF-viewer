@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import json
 import os
 import queue
 import tempfile
@@ -7,8 +8,12 @@ import unittest
 from pathlib import Path
 from unittest import mock
 
+from comfy_metadata_reader import MetadataEntry
 from comfy_exif_viewer import (
     _AllowedDropRedirectHandler,
+    _CivitaiImageInfo,
+    _DownloadedImage,
+    DEFAULT_ALLOWED_DROP_URL_HOSTS,
     MAX_RECENT_IMAGES,
     MetadataViewer,
     _app_cache_dir,
@@ -19,7 +24,10 @@ from comfy_exif_viewer import (
     _is_supported_drop_item,
     _load_allowed_url_hosts,
     _load_recent_paths,
+    _civitai_original_asset_url,
+    _parse_civitai_image_page,
     _parse_allowed_url_hosts,
+    _resolve_civitai_image_page,
     _save_allowed_url_hosts,
     _save_recent_paths,
     _suffix_from_url_or_content_type,
@@ -27,12 +35,17 @@ from comfy_exif_viewer import (
 
 
 class _FakeResponse:
-    def __init__(self, final_url: str, payload: bytes) -> None:
+    def __init__(
+        self,
+        final_url: str,
+        payload: bytes,
+        content_type: str = "image/png",
+    ) -> None:
         self.final_url = final_url
         self.payload = payload
         self.offset = 0
         self.headers = {
-            "Content-Type": "image/png",
+            "Content-Type": content_type,
             "Content-Length": str(len(payload)),
         }
 
@@ -75,6 +88,24 @@ class DropUrlTests(unittest.TestCase):
 
     def test_blocks_non_https_urls(self) -> None:
         self.assertFalse(_is_allowed_drop_url("http://ac-o.namu.la/sample.png"))
+
+    def test_allows_civitai_page_and_cdn_hosts_by_default(self) -> None:
+        self.assertTrue(
+            _is_allowed_drop_url("https://civitai.red/images/135875665")
+        )
+        self.assertTrue(
+            _is_allowed_drop_url("https://civitai.com/images/135875665")
+        )
+        self.assertTrue(
+            _is_allowed_drop_url(
+                "https://image.civitai.com/path/original=true/135875665.jpeg"
+            )
+        )
+        self.assertTrue(
+            _is_allowed_drop_url(
+                "https://image-b2.civitai.com/file/civitai-media-cache/id/original"
+            )
+        )
 
     def test_allows_configured_exact_host(self) -> None:
         allowed_hosts = frozenset({"images.example.com"})
@@ -151,6 +182,60 @@ class DropUrlTests(unittest.TestCase):
         self.assertFalse(_is_supported_drop_item(r"D:\images\sample.txt"))
         self.assertFalse(_is_supported_drop_item("https://example.com/sample.png"))
 
+    def test_supports_only_civitai_image_pages_and_direct_cdn_images(self) -> None:
+        self.assertTrue(
+            _is_supported_drop_item("https://civitai.red/images/135875665")
+        )
+        self.assertTrue(
+            _is_supported_drop_item("https://civitai.com/images/135875665/")
+        )
+        self.assertTrue(
+            _is_supported_drop_item(
+                "https://image.civitai.com/path/anim=false,width=450/image.jpeg"
+            )
+        )
+        self.assertFalse(
+            _is_supported_drop_item("https://civitai.com/models/123/example")
+        )
+
+    def test_civitai_cdn_variant_is_rewritten_to_original_asset(self) -> None:
+        url = (
+            "https://image.civitai.com/token/"
+            "dc7a1cd5-d51b-45be-9bcc-6998c2165d35/"
+            "anim=false,width=450,optimized=true/image.jpeg"
+        )
+
+        self.assertEqual(
+            _civitai_original_asset_url(url),
+            "https://image.civitai.com/token/"
+            "dc7a1cd5-d51b-45be-9bcc-6998c2165d35/"
+            "original=true/image.jpeg",
+        )
+
+    def test_direct_civitai_download_requests_original_asset(self) -> None:
+        url = (
+            "https://image.civitai.com/token/"
+            "dc7a1cd5-d51b-45be-9bcc-6998c2165d35/"
+            "anim=false,width=450,optimized=true/image.jpeg"
+        )
+        original_url = _civitai_original_asset_url(url)
+        response = _FakeResponse(original_url, b"original-image")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with _temporary_local_app_data(temp_dir):
+                with mock.patch(
+                    "comfy_exif_viewer._open_allowed_drop_url",
+                    return_value=response,
+                ) as open_url:
+                    downloaded = MetadataViewer._download_image_url(
+                        _DownloadOwner(), url
+                    )
+
+                downloaded_bytes = downloaded.path.read_bytes()
+
+        request = open_url.call_args.args[0]
+        self.assertEqual(request.full_url, original_url)
+        self.assertEqual(downloaded_bytes, b"original-image")
+
     def test_uses_content_type_when_url_has_no_suffix(self) -> None:
         self.assertEqual(
             _suffix_from_url_or_content_type(
@@ -188,13 +273,15 @@ class DropUrlTests(unittest.TestCase):
                     "comfy_exif_viewer._open_allowed_drop_url",
                     return_value=response,
                 ):
-                    path = MetadataViewer._download_image_url(
+                    downloaded = MetadataViewer._download_image_url(
                         _DownloadOwner(),
                         "https://ac-o.namu.la/image.png",
                     )
 
-                self.assertEqual(path.read_bytes(), payload)
-                self.assertFalse(path.with_name(path.name + ".part").exists())
+                self.assertEqual(downloaded.path.read_bytes(), payload)
+                self.assertFalse(
+                    downloaded.path.with_name(downloaded.path.name + ".part").exists()
+                )
 
     def test_streams_download_from_configured_custom_host(self) -> None:
         payload = b"custom-host-image"
@@ -207,14 +294,157 @@ class DropUrlTests(unittest.TestCase):
                     "comfy_exif_viewer._open_allowed_drop_url",
                     return_value=response,
                 ) as open_url:
-                    path = MetadataViewer._download_image_url(
+                    downloaded = MetadataViewer._download_image_url(
                         _DownloadOwner(),
                         url,
                         allowed_hosts=allowed_hosts,
                     )
 
-                self.assertEqual(path.read_bytes(), payload)
+                self.assertEqual(downloaded.path.read_bytes(), payload)
                 self.assertEqual(open_url.call_args.args[1], allowed_hosts)
+
+    def test_resolves_civitai_page_before_downloading_image(self) -> None:
+        page_url = "https://civitai.red/images/135875665"
+        image_url = "https://image.civitai.com/path/original=true/135875665.jpeg"
+        entries = ()
+        response = _FakeResponse(image_url, b"jpeg-image")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with _temporary_local_app_data(temp_dir):
+                with mock.patch(
+                    "comfy_exif_viewer._resolve_civitai_image_page",
+                    return_value=_CivitaiImageInfo(image_url, entries),
+                ) as resolve_page:
+                    with mock.patch(
+                        "comfy_exif_viewer._open_allowed_drop_url",
+                        return_value=response,
+                    ):
+                        downloaded = MetadataViewer._download_image_url(
+                            _DownloadOwner(), page_url
+                        )
+
+                downloaded_bytes = downloaded.path.read_bytes()
+
+        resolve_page.assert_called_once_with(
+            page_url, frozenset(DEFAULT_ALLOWED_DROP_URL_HOSTS)
+        )
+        self.assertEqual(downloaded_bytes, b"jpeg-image")
+
+    def test_numeric_cdn_link_uses_matching_page_metadata(self) -> None:
+        asset_id = "847bf52a-1fc1-406c-8f67-749302a7f268"
+        direct_url = (
+            f"https://image.civitai.com/root/{asset_id}/original/135875665.jpeg"
+        )
+        page_url = f"https://image.civitai.com/root/{asset_id}/original/image.jpeg"
+        entries = (MetadataEntry("Civitai", "prompt", "cat"),)
+        response = _FakeResponse(direct_url, b"image")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with _temporary_local_app_data(temp_dir):
+                with mock.patch(
+                    "comfy_exif_viewer._resolve_civitai_image_page",
+                    return_value=_CivitaiImageInfo(page_url, entries),
+                ):
+                    with mock.patch(
+                        "comfy_exif_viewer._open_allowed_drop_url",
+                        return_value=response,
+                    ):
+                        downloaded = MetadataViewer._download_image_url(
+                            _DownloadOwner(), direct_url
+                        )
+
+        self.assertEqual(downloaded.supplemental_entries, entries)
+
+    def test_numeric_cdn_link_ignores_metadata_for_different_asset(self) -> None:
+        direct_url = (
+            "https://image.civitai.com/root/"
+            "847bf52a-1fc1-406c-8f67-749302a7f268/original/135875665.jpeg"
+        )
+        other_url = (
+            "https://image.civitai.com/root/"
+            "dc7a1cd5-d51b-45be-9bcc-6998c2165d35/original/image.jpeg"
+        )
+        entries = (MetadataEntry("Civitai", "prompt", "wrong image"),)
+        response = _FakeResponse(direct_url, b"image")
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with _temporary_local_app_data(temp_dir):
+                with mock.patch(
+                    "comfy_exif_viewer._resolve_civitai_image_page",
+                    return_value=_CivitaiImageInfo(other_url, entries),
+                ):
+                    with mock.patch(
+                        "comfy_exif_viewer._open_allowed_drop_url",
+                        return_value=response,
+                    ):
+                        downloaded = MetadataViewer._download_image_url(
+                            _DownloadOwner(), direct_url
+                        )
+
+        self.assertEqual(downloaded.supplemental_entries, ())
+
+    def test_parses_civitai_original_url_and_generation_metadata(self) -> None:
+        source = """
+        <html><head>
+        <script type="application/ld+json">
+        {"@type":"ImageObject","contentUrl":"https://image.civitai.com/path/original=true/135875665.jpeg"}
+        </script></head><body>
+        <script id="__NEXT_DATA__" type="application/json">
+        {"props":{"pageProps":{"trpcState":{"json":{"queries":[{
+          "queryKey":[["image","get"],{"input":{"id":135875665}}],
+          "state":{"data":{"type":"image","meta":{
+            "prompt":"cat","negativePrompt":"dog","steps":30,
+            "sampler":"Euler","cfgScale":5,"seed":123,
+            "Model":"Anima","width":1024,"height":1536
+          }}}
+        }]}}}}}
+        </script></body></html>
+        """
+
+        info = _parse_civitai_image_page(source, 135875665)
+
+        self.assertEqual(
+            info.image_url,
+            "https://image.civitai.com/path/original=true/135875665.jpeg",
+        )
+        values = {(entry.key, entry.value) for entry in info.metadata_entries}
+        self.assertIn(("prompt", "cat"), values)
+        self.assertIn(("negative_prompt", "dog"), values)
+        self.assertTrue(
+            any(key == "settings" and "Steps: 30" in value for key, value in values)
+        )
+
+    def test_red_civitai_page_is_resolved_through_matching_com_page(self) -> None:
+        source = b"""
+        <script type="application/ld+json">
+        {"@type":"ImageObject","contentUrl":"https://image.civitai.com/image.jpeg"}
+        </script>
+        """
+        response = _FakeResponse(
+            "https://civitai.com/images/135875665",
+            source,
+            "text/html; charset=utf-8",
+        )
+        allowed_hosts = frozenset(DEFAULT_ALLOWED_DROP_URL_HOSTS)
+        with mock.patch(
+            "comfy_exif_viewer._open_allowed_drop_url", return_value=response
+        ) as open_url:
+            info = _resolve_civitai_image_page(
+                "https://civitai.red/images/135875665", allowed_hosts
+            )
+
+        request = open_url.call_args.args[0]
+        self.assertEqual(
+            request.full_url, "https://civitai.com/images/135875665"
+        )
+        self.assertEqual(info.image_url, "https://image.civitai.com/image.jpeg")
+
+    def test_rejects_civitai_page_with_untrusted_image_asset(self) -> None:
+        source = """
+        <script type="application/ld+json">
+        {"@type":"ImageObject","contentUrl":"https://example.com/image.jpeg"}
+        </script>
+        """
+
+        with self.assertRaisesRegex(ValueError, "original image URL"):
+            _parse_civitai_image_page(source, 135875665)
 
     def test_rejects_each_redirect_hop_outside_allowed_host(self) -> None:
         handler = _AllowedDropRedirectHandler()
@@ -249,23 +479,55 @@ class DropUrlTests(unittest.TestCase):
 
                 self.assertEqual(_load_allowed_url_hosts(), expected)
 
-    def test_missing_or_invalid_settings_keep_arcalive_default(self) -> None:
+    def test_missing_or_invalid_settings_keep_default_sites(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             with _temporary_local_app_data(temp_dir):
                 self.assertEqual(
-                    _load_allowed_url_hosts(), frozenset({"ac-o.namu.la"})
+                    _load_allowed_url_hosts(), frozenset(DEFAULT_ALLOWED_DROP_URL_HOSTS)
                 )
                 settings_path = Path(temp_dir) / "ComfyUI-EXIF-viewer" / "settings.json"
                 settings_path.parent.mkdir(parents=True)
                 settings_path.write_text("[]", encoding="utf-8")
 
                 self.assertEqual(
-                    _load_allowed_url_hosts(), frozenset({"ac-o.namu.la"})
+                    _load_allowed_url_hosts(), frozenset(DEFAULT_ALLOWED_DROP_URL_HOSTS)
                 )
                 settings_path.write_text("not-json", encoding="utf-8")
 
                 self.assertEqual(
-                    _load_allowed_url_hosts(), frozenset({"ac-o.namu.la"})
+                    _load_allowed_url_hosts(), frozenset(DEFAULT_ALLOWED_DROP_URL_HOSTS)
+                )
+
+    def test_migrates_legacy_arcalive_default_to_new_default_sites(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with _temporary_local_app_data(temp_dir):
+                settings_path = Path(temp_dir) / "ComfyUI-EXIF-viewer" / "settings.json"
+                settings_path.parent.mkdir(parents=True)
+                settings_path.write_text(
+                    json.dumps({"allowed_image_hosts": ["ac-o.namu.la"]}),
+                    encoding="utf-8",
+                )
+
+                self.assertEqual(
+                    _load_allowed_url_hosts(), frozenset(DEFAULT_ALLOWED_DROP_URL_HOSTS)
+                )
+
+    def test_preserves_legacy_empty_or_custom_allowed_sites(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            with _temporary_local_app_data(temp_dir):
+                settings_path = Path(temp_dir) / "ComfyUI-EXIF-viewer" / "settings.json"
+                settings_path.parent.mkdir(parents=True)
+                settings_path.write_text(
+                    json.dumps({"allowed_image_hosts": []}), encoding="utf-8"
+                )
+                self.assertEqual(_load_allowed_url_hosts(), frozenset())
+
+                settings_path.write_text(
+                    json.dumps({"allowed_image_hosts": ["images.example.com"]}),
+                    encoding="utf-8",
+                )
+                self.assertEqual(
+                    _load_allowed_url_hosts(), frozenset({"images.example.com"})
                 )
 
     def test_recent_cache_is_capped(self) -> None:
@@ -348,6 +610,27 @@ class DropUrlTests(unittest.TestCase):
         owner.after.assert_not_called()
         self.assertFalse(owner.processing_drop_queue)
         self.assertIsNone(owner.download_thread)
+
+    def test_download_completion_passes_civitai_metadata_to_open_path(self) -> None:
+        owner = MetadataViewer.__new__(MetadataViewer)
+        owner.download_thread = mock.Mock()
+        owner.drop_frame = mock.Mock()
+        owner.drop_label = mock.Mock()
+        owner._hide_download_progress = mock.Mock()
+        owner.navigation_generation = 3
+        owner.drop_queue = []
+        owner.processing_drop_queue = False
+        owner.open_path = mock.Mock()
+        entries = (MetadataEntry("Civitai", "prompt", "cat"),)
+        downloaded = _DownloadedImage(Path("civitai.jpeg"), entries)
+
+        MetadataViewer._finish_url_download(owner, downloaded, "", 3)
+
+        owner.open_path.assert_called_once_with(
+            Path("civitai.jpeg"),
+            from_queue=True,
+            supplemental_entries=entries,
+        )
 
     def test_dead_worker_remains_owned_until_completion_event_is_consumed(self) -> None:
         owner = MetadataViewer.__new__(MetadataViewer)

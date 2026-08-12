@@ -8,7 +8,13 @@ import zlib
 from pathlib import Path
 from unittest import mock
 
-from comfy_metadata_reader import extract_civitai_resources, extract_sections, read_metadata
+from comfy_metadata_reader import (
+    MetadataEntry,
+    MetadataResult,
+    extract_civitai_resources,
+    extract_sections,
+    read_metadata,
+)
 
 
 def png_chunk(kind: bytes, payload: bytes) -> bytes:
@@ -122,6 +128,48 @@ def make_stealth_png(payload: str) -> bytes:
 
 
 class MetadataReaderTests(unittest.TestCase):
+    def test_uses_civitai_page_metadata_when_image_has_no_embedded_prompt(self) -> None:
+        result = MetadataResult(
+            path=Path("civitai.jpeg"),
+            format_name="JPEG",
+            entries=[
+                MetadataEntry("Civitai", "prompt", "cat"),
+                MetadataEntry("Civitai", "negative_prompt", "dog"),
+                MetadataEntry("Civitai", "settings", "Steps: 30\nSeed: 123"),
+            ],
+            warnings=[],
+        )
+
+        sections = extract_sections(result)
+
+        self.assertEqual(sections.platform, "Civitai")
+        self.assertEqual(sections.prompt, "cat")
+        self.assertEqual(sections.negative_prompt, "dog")
+        self.assertEqual(sections.settings, "Steps: 30\nSeed: 123")
+
+    def test_embedded_parameters_take_priority_over_civitai_page_metadata(self) -> None:
+        result = MetadataResult(
+            path=Path("civitai.webp"),
+            format_name="WEBP",
+            entries=[
+                MetadataEntry(
+                    "Generic",
+                    "parameters",
+                    "embedded cat\nNegative prompt: embedded dog\nSteps: 20",
+                ),
+                MetadataEntry("Civitai", "prompt", "page cat"),
+                MetadataEntry("Civitai", "negative_prompt", "page dog"),
+                MetadataEntry("Civitai", "settings", "Steps: 30"),
+            ],
+            warnings=[],
+        )
+
+        sections = extract_sections(result)
+
+        self.assertEqual(sections.prompt, "embedded cat")
+        self.assertEqual(sections.negative_prompt, "embedded dog")
+        self.assertEqual(sections.settings, "Steps: 20")
+
     def test_reads_png_parameters_text(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "sample.png"
