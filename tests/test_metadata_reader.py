@@ -174,6 +174,19 @@ class MetadataReaderTests(unittest.TestCase):
         self.assertEqual(sections.negative_prompt, "dog")
         self.assertIn("Steps: 20", sections.settings)
 
+    def test_stops_on_jpeg_segment_shorter_than_length_field(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "malformed.jpg"
+            path.write_bytes(b"\xff\xd8\xff\xe1\x00\x00")
+
+            result = read_metadata(path)
+
+        self.assertEqual(result.format_name, "JPEG")
+        self.assertTrue(
+            any("smaller than its length field" in warning for warning in result.warnings),
+            result.warnings,
+        )
+
     def test_reads_novelai_comment_json(self) -> None:
         payload = '{"prompt":"cat","uc":"dog","steps":28,"sampler":"k_euler"}'
         with tempfile.TemporaryDirectory() as temp_dir:

@@ -519,6 +519,9 @@ def _read_jpeg_entries(data: bytes, warnings: list[str]) -> list[MetadataEntry]:
             break
 
         segment_length = struct.unpack(">H", data[offset : offset + 2])[0]
+        if segment_length < 2:
+            warnings.append("JPEG segment length is smaller than its length field.")
+            break
         segment_start = offset + 2
         segment_end = offset + segment_length
         if segment_end > len(data):

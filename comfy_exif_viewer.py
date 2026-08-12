@@ -3,8 +3,11 @@ from __future__ import annotations
 import argparse
 import ctypes
 import hashlib
+import ipaddress
 import json
 import os
+import queue
+import re
 import tempfile
 import threading
 import tkinter as tk
@@ -53,9 +56,10 @@ SUPPORTED_FILETYPES = (
 SUPPORTED_SUFFIXES = {".png", ".webp", ".jpg", ".jpeg"}
 MAX_DROP_DOWNLOAD_BYTES = 100 * 1024 * 1024
 DROP_DOWNLOAD_CHUNK_BYTES = 256 * 1024
-ALLOWED_DROP_URL_HOSTS = {"ac-o.namu.la"}
+DEFAULT_ALLOWED_DROP_URL_HOSTS = ("ac-o.namu.la",)
 APP_DIR_NAME = "ComfyUI-EXIF-viewer"
 RECENT_CACHE_FILENAME = "recent_images.json"
+SETTINGS_FILENAME = "settings.json"
 MAX_RECENT_IMAGES = 8
 APP_VERSION = "0.1.4"
 PREVIEW_PANEL_MIN_WIDTH = 760
@@ -106,6 +110,7 @@ class MetadataViewer(BaseTk):
         self.current_result: MetadataResult | None = None
         self.current_image_path: Path | None = None
         self.recent_paths: list[Path] = _load_recent_paths()
+        self.allowed_url_hosts = _load_allowed_url_hosts()
         self.recent_expanded = True
         self.content_pane: tk.PanedWindow | None = None
         self.drop_queue: list[str] = []
@@ -113,7 +118,10 @@ class MetadataViewer(BaseTk):
         self.preview_photo: object | None = None
         self.preview_after_id: str | None = None
         self.download_thread: threading.Thread | None = None
+        self.download_events: queue.Queue[tuple[object, ...]] = queue.Queue()
+        self.download_poll_after_id: str | None = None
         self.download_progress_indeterminate = False
+        self.navigation_generation = 0
 
         self._build_ui()
         self._refresh_recent_images()
@@ -494,7 +502,73 @@ class MetadataViewer(BaseTk):
             command=self._apply_recent_visibility,
         )
         menubar.add_cascade(label="View", menu=view_menu)
+
+        settings_menu = tk.Menu(menubar, tearoff=False)
+        settings_menu.add_command(
+            label="Allowed Image Sites...",
+            command=self.edit_allowed_image_sites,
+        )
+        menubar.add_cascade(label="Settings", menu=settings_menu)
         self.configure(menu=menubar)
+
+    def edit_allowed_image_sites(self) -> None:
+        existing = getattr(self, "allowed_sites_window", None)
+        if existing is not None and existing.winfo_exists():
+            existing.lift()
+            existing.focus_force()
+            return
+
+        window = tk.Toplevel(self)
+        self.allowed_sites_window = window
+        window.title("Allowed Image Sites")
+        window.transient(self)
+        window.resizable(True, True)
+        window.minsize(520, 360)
+        window.columnconfigure(0, weight=1)
+        window.rowconfigure(1, weight=1)
+
+        ttk.Label(
+            window,
+            text=(
+                "Enter one HTTPS hostname per line. Use *.example.com to allow "
+                "all of its subdomains. An empty list disables URL downloads."
+            ),
+            wraplength=490,
+            justify=tk.LEFT,
+        ).grid(row=0, column=0, sticky="ew", padx=16, pady=(16, 10))
+
+        hosts_text = tk.Text(
+            window,
+            wrap=tk.NONE,
+            height=12,
+            font=(self.mono_font_family, 10),
+        )
+        hosts_text.grid(row=1, column=0, sticky="nsew", padx=16)
+        hosts_text.insert("1.0", "\n".join(sorted(self.allowed_url_hosts)))
+
+        button_row = ttk.Frame(window)
+        button_row.grid(row=2, column=0, sticky="e", padx=16, pady=16)
+
+        def save() -> None:
+            try:
+                hosts = _parse_allowed_url_hosts(hosts_text.get("1.0", tk.END))
+                _save_allowed_url_hosts(hosts)
+            except ValueError as exc:
+                messagebox.showerror("Invalid hostname", str(exc), parent=window)
+                return
+            except OSError as exc:
+                messagebox.showerror("Settings save failed", str(exc), parent=window)
+                return
+            self.allowed_url_hosts = hosts
+            self.status_var.set(
+                f"Allowed image sites updated: {len(hosts)} host rule(s)."
+            )
+            window.destroy()
+
+        ttk.Button(button_row, text="Cancel", command=window.destroy).grid(
+            row=0, column=0, padx=(0, 8)
+        )
+        ttk.Button(button_row, text="Save", command=save).grid(row=0, column=1)
 
     def _build_recent_images(self, parent: ttk.Frame) -> None:
         self.recent_frame = ttk.Frame(parent, padding=(0, 0, 8, 10))
@@ -618,19 +692,30 @@ class MetadataViewer(BaseTk):
         if selected:
             self.open_path(selected)
 
-    def open_path(self, path: str | Path) -> None:
+    def open_path(self, path: str | Path, *, from_queue: bool = False) -> None:
         try:
             result = read_metadata(path)
         except Exception as exc:
             messagebox.showerror("Read failed", str(exc))
             return
 
+        if not from_queue:
+            self._supersede_drop_navigation()
         self.current_result = result
         self.path_var.set(str(result.path))
         self.current_image_path = result.path
         self._render_preview(result.path, result.format_name)
         self._render_result(result)
         self._add_recent_path(result.path)
+
+    def _supersede_drop_navigation(self) -> None:
+        self.navigation_generation += 1
+        self.drop_queue.clear()
+        self.processing_drop_queue = False
+        if self.download_thread is not None:
+            self.drop_frame.configure(cursor="")
+            self.drop_label.configure(cursor="")
+            self._hide_download_progress()
 
     def _render_result(self, result: MetadataResult) -> None:
         sections = extract_sections(result)
@@ -778,7 +863,7 @@ class MetadataViewer(BaseTk):
         Path(selected).write_text(text + "\n", encoding="utf-8")
 
     def clear_cache(self) -> None:
-        if self.download_thread is not None and self.download_thread.is_alive():
+        if self.download_thread is not None:
             messagebox.showinfo(
                 "Clear cache",
                 "Wait for the current image download to finish before clearing cache.",
@@ -792,9 +877,16 @@ class MetadataViewer(BaseTk):
         ):
             return
 
+        current_cache_path = (
+            self.current_image_path
+            if self.current_image_path is not None
+            and _is_app_cache_path(self.current_image_path)
+            else None
+        )
         deleted_count = _clear_app_cache_files()
+        if current_cache_path is not None and not current_cache_path.exists():
+            self.current_image_path = None
         self.recent_paths = []
-        _save_recent_paths(self.recent_paths)
         self._refresh_recent_images()
         self.status_var.set(f"Cache cleared. Deleted {deleted_count} cached files.")
 
@@ -820,8 +912,18 @@ class MetadataViewer(BaseTk):
         self.recent_paths = [item for item in self.recent_paths if item != resolved]
         self.recent_paths.insert(0, resolved)
         del self.recent_paths[MAX_RECENT_IMAGES:]
-        _save_recent_paths(self.recent_paths)
+        self._persist_recent_paths()
         self._refresh_recent_images()
+
+    def _persist_recent_paths(self) -> bool:
+        try:
+            _save_recent_paths(self.recent_paths)
+        except OSError as exc:
+            self.status_var.set(
+                f"Recent image history could not be saved: {exc}"
+            )
+            return False
+        return True
 
     def _refresh_recent_images(self) -> None:
         if not hasattr(self, "recent_listbox"):
@@ -842,7 +944,7 @@ class MetadataViewer(BaseTk):
             if not path.exists():
                 self.status_var.set(f"Recent image is missing: {path.name}")
                 self.recent_paths.pop(index)
-                _save_recent_paths(self.recent_paths)
+                self._persist_recent_paths()
                 self._refresh_recent_images()
                 return "break"
             self.open_path(path)
@@ -952,20 +1054,19 @@ class MetadataViewer(BaseTk):
             return False
 
         self.drop_queue.extend(supported_items)
-        if self.processing_drop_queue or (
-            self.download_thread is not None and self.download_thread.is_alive()
-        ):
+        if self.processing_drop_queue or self.download_thread is not None:
             self.status_var.set(
                 f"Queued {len(supported_items)} image(s). "
                 f"{len(self.drop_queue)} waiting."
             )
             return True
 
+        self.navigation_generation += 1
         self._process_next_drop_queue_item()
         return True
 
     def _process_next_drop_queue_item(self) -> None:
-        if self.download_thread is not None and self.download_thread.is_alive():
+        if self.download_thread is not None:
             return
 
         if not self.drop_queue:
@@ -980,9 +1081,11 @@ class MetadataViewer(BaseTk):
             return
 
         if parsed.scheme == "file":
-            self.open_path(Path(urllib.request.url2pathname(parsed.path)))
+            self.open_path(
+                Path(urllib.request.url2pathname(parsed.path)), from_queue=True
+            )
         else:
-            self.open_path(Path(item))
+            self.open_path(Path(item), from_queue=True)
 
         self.after(0, self._process_next_drop_queue_item)
 
@@ -1006,23 +1109,33 @@ class MetadataViewer(BaseTk):
         return items
 
     def _supported_drop_items(self, items: list[str]) -> list[str]:
-        return [item for item in items if _is_supported_drop_item(item)]
+        return [
+            item
+            for item in items
+            if _is_supported_drop_item(item, self.allowed_url_hosts)
+        ]
 
     def open_url(self, url: str, from_queue: bool = False) -> None:
-        if not _is_allowed_drop_url(url):
+        allowed_hosts = frozenset(self.allowed_url_hosts)
+        if not _is_allowed_drop_url(url, allowed_hosts):
             messagebox.showerror(
                 "Unsupported URL",
-                "Only ac-o.namu.la image URLs are allowed for security.",
+                "This HTTPS hostname is not in Settings > Allowed Image Sites.",
             )
+            if from_queue and self.processing_drop_queue:
+                self.after(0, self._process_next_drop_queue_item)
             return
 
-        if self.download_thread is not None and self.download_thread.is_alive():
+        if self.download_thread is not None:
             if not from_queue:
                 self.drop_queue.append(url)
             self.status_var.set(
                 f"Queued dropped image URL. {len(self.drop_queue)} waiting."
             )
             return
+
+        if not from_queue:
+            self._supersede_drop_navigation()
 
         self.status_var.set(
             "Downloading dropped image URL..."
@@ -1033,25 +1146,38 @@ class MetadataViewer(BaseTk):
         self.drop_label.configure(cursor="watch")
         self.download_thread = threading.Thread(
             target=self._download_image_url_worker,
-            args=(url,),
+            args=(url, self.navigation_generation, allowed_hosts),
             daemon=True,
         )
         self.download_thread.start()
+        self._schedule_download_event_poll()
 
-    def _download_image_url_worker(self, url: str) -> None:
+    def _download_image_url_worker(
+        self,
+        url: str,
+        generation: int,
+        allowed_hosts: frozenset[str] | None = None,
+    ) -> None:
         try:
-            path = self._download_image_url(url)
+            path = self._download_image_url(url, generation, allowed_hosts)
         except Exception as exc:
-            error = str(exc)
-            self.after(0, lambda error=error: self._finish_url_download(None, error))
+            self.download_events.put(("finished", generation, None, str(exc)))
             return
-        self.after(0, lambda path=path: self._finish_url_download(path, ""))
+        self.download_events.put(("finished", generation, path, ""))
 
-    def _finish_url_download(self, path: Path | None, error: str) -> None:
+    def _finish_url_download(
+        self, path: Path | None, error: str, generation: int
+    ) -> None:
         self.download_thread = None
         self.drop_frame.configure(cursor="")
         self.drop_label.configure(cursor="")
         self._hide_download_progress()
+        if generation != self.navigation_generation:
+            if self.drop_queue:
+                self.after(0, self._process_next_drop_queue_item)
+            else:
+                self.processing_drop_queue = False
+            return
         if error:
             messagebox.showerror("Download failed", error)
             self.status_var.set(
@@ -1061,7 +1187,7 @@ class MetadataViewer(BaseTk):
                 self.after(0, self._process_next_drop_queue_item)
             return
         if path is not None:
-            self.open_path(path)
+            self.open_path(path, from_queue=True)
         if self.processing_drop_queue:
             self.after(0, self._process_next_drop_queue_item)
 
@@ -1070,9 +1196,18 @@ class MetadataViewer(BaseTk):
             return ""
         return f" {len(self.drop_queue)} queued."
 
-    def _download_image_url(self, url: str) -> Path:
-        if not _is_allowed_drop_url(url):
-            raise ValueError("Only ac-o.namu.la image URLs are allowed.")
+    def _download_image_url(
+        self,
+        url: str,
+        generation: int | None = None,
+        allowed_hosts: frozenset[str] | None = None,
+    ) -> Path:
+        if allowed_hosts is None:
+            allowed_hosts = frozenset(
+                getattr(self, "allowed_url_hosts", DEFAULT_ALLOWED_DROP_URL_HOSTS)
+            )
+        if not _is_allowed_drop_url(url, allowed_hosts):
+            raise ValueError("Image URL hostname is not allowed in settings.")
 
         request = urllib.request.Request(
             url,
@@ -1083,9 +1218,9 @@ class MetadataViewer(BaseTk):
                 )
             },
         )
-        with _open_allowed_drop_url(request) as response:
+        with _open_allowed_drop_url(request, allowed_hosts) as response:
             final_url = response.geturl()
-            if not _is_allowed_drop_url(final_url):
+            if not _is_allowed_drop_url(final_url, allowed_hosts):
                 raise ValueError("Image URL redirected outside the allowed host.")
             content_type = response.headers.get("Content-Type", "").split(";", 1)[0]
             content_length = response.headers.get("Content-Length")
@@ -1113,7 +1248,9 @@ class MetadataViewer(BaseTk):
                         if received_bytes > MAX_DROP_DOWNLOAD_BYTES:
                             raise ValueError("Dropped image URL is too large.")
                         output.write(chunk)
-                        self._queue_download_progress(received_bytes, total_bytes)
+                        self._queue_download_progress(
+                            received_bytes, total_bytes, generation
+                        )
                 partial_path.replace(path)
             except Exception:
                 partial_path.unlink(missing_ok=True)
@@ -1136,14 +1273,37 @@ class MetadataViewer(BaseTk):
         self.progress_frame.grid_remove()
 
     def _queue_download_progress(
-        self, received_bytes: int, total_bytes: int | None
+        self,
+        received_bytes: int,
+        total_bytes: int | None,
+        generation: int | None = None,
     ) -> None:
-        self.after(
-            0,
-            lambda received=received_bytes, total=total_bytes: self._set_download_progress(
-                received, total
-            ),
+        if generation is None:
+            generation = self.navigation_generation
+        self.download_events.put(
+            ("progress", generation, received_bytes, total_bytes)
         )
+
+    def _schedule_download_event_poll(self) -> None:
+        if self.download_poll_after_id is None:
+            self.download_poll_after_id = self.after(50, self._poll_download_events)
+
+    def _poll_download_events(self) -> None:
+        self.download_poll_after_id = None
+        while True:
+            try:
+                event = self.download_events.get_nowait()
+            except queue.Empty:
+                break
+            event_type, generation, *payload = event
+            if event_type == "progress":
+                if generation == self.navigation_generation:
+                    self._set_download_progress(payload[0], payload[1])
+            elif event_type == "finished":
+                self._finish_url_download(payload[0], payload[1], generation)
+
+        if self.download_thread is not None:
+            self._schedule_download_event_poll()
 
     def _set_download_progress(
         self, received_bytes: int, total_bytes: int | None
@@ -1176,9 +1336,12 @@ class MetadataViewer(BaseTk):
             return
         if self.preview_after_id is not None:
             self.after_cancel(self.preview_after_id)
-        self.preview_after_id = self.after(
-            100, lambda: self._render_preview(self.current_image_path)
-        )
+        self.preview_after_id = self.after(100, self._refresh_scheduled_preview)
+
+    def _refresh_scheduled_preview(self) -> None:
+        self.preview_after_id = None
+        if self.current_image_path is not None:
+            self._render_preview(self.current_image_path)
 
     def _render_preview(self, path: Path, format_name: str | None = None) -> None:
         self.preview_after_id = None
@@ -1228,6 +1391,14 @@ def _suffix_from_url_or_content_type(url: str, content_type: str) -> str:
 
 
 class _AllowedDropRedirectHandler(urllib.request.HTTPRedirectHandler):
+    def __init__(self, allowed_hosts: frozenset[str] | None = None) -> None:
+        super().__init__()
+        self.allowed_hosts = (
+            frozenset(DEFAULT_ALLOWED_DROP_URL_HOSTS)
+            if allowed_hosts is None
+            else allowed_hosts
+        )
+
     def redirect_request(
         self,
         req: urllib.request.Request,
@@ -1237,27 +1408,44 @@ class _AllowedDropRedirectHandler(urllib.request.HTTPRedirectHandler):
         headers: Any,
         newurl: str,
     ) -> urllib.request.Request | None:
-        if not _is_allowed_drop_url(newurl):
+        if not _is_allowed_drop_url(newurl, self.allowed_hosts):
             raise ValueError("Image URL redirected outside the allowed host.")
         return super().redirect_request(req, fp, code, msg, headers, newurl)
 
 
-def _open_allowed_drop_url(request: urllib.request.Request) -> Any:
-    opener = urllib.request.build_opener(_AllowedDropRedirectHandler())
+def _open_allowed_drop_url(
+    request: urllib.request.Request,
+    allowed_hosts: frozenset[str] | None = None,
+) -> Any:
+    opener = urllib.request.build_opener(_AllowedDropRedirectHandler(allowed_hosts))
     return opener.open(request, timeout=20)
 
 
-def _is_allowed_drop_url(url: str) -> bool:
+def _is_allowed_drop_url(
+    url: str,
+    allowed_hosts: frozenset[str] | None = None,
+) -> bool:
     parsed = urllib.parse.urlparse(url)
     if parsed.scheme not in {"https"}:
         return False
-    hostname = (parsed.hostname or "").lower()
-    return hostname in ALLOWED_DROP_URL_HOSTS
+    try:
+        hostname = _normalize_allowed_url_host(parsed.hostname or "")
+    except ValueError:
+        return False
+    rules = (
+        frozenset(DEFAULT_ALLOWED_DROP_URL_HOSTS)
+        if allowed_hosts is None
+        else allowed_hosts
+    )
+    return any(_host_matches_rule(hostname, rule) for rule in rules)
 
 
-def _is_supported_drop_item(item: str) -> bool:
+def _is_supported_drop_item(
+    item: str,
+    allowed_hosts: frozenset[str] | None = None,
+) -> bool:
     parsed = urllib.parse.urlparse(item)
-    if _is_allowed_drop_url(item):
+    if _is_allowed_drop_url(item, allowed_hosts):
         return True
     if parsed.scheme in {"http", "https"}:
         return False
@@ -1297,6 +1485,97 @@ def _recent_cache_path() -> Path:
     return _app_data_dir() / RECENT_CACHE_FILENAME
 
 
+def _settings_path() -> Path:
+    return _app_data_dir() / SETTINGS_FILENAME
+
+
+def _normalize_allowed_url_host(value: str) -> str:
+    candidate = value.strip().lower().rstrip(".")
+    if not candidate:
+        raise ValueError("Hostname is empty.")
+
+    if "://" in candidate:
+        parsed = urllib.parse.urlparse(candidate)
+        if parsed.scheme != "https" or not parsed.hostname:
+            raise ValueError(f"Only HTTPS site URLs are supported: {value}")
+        candidate = parsed.hostname.lower().rstrip(".")
+
+    wildcard = candidate.startswith("*.")
+    if wildcard:
+        candidate = candidate[2:]
+    if not candidate or any(marker in candidate for marker in "/?#@"):
+        raise ValueError(f"Invalid hostname: {value}")
+
+    try:
+        ipaddress.ip_address(candidate)
+        normalized = candidate
+    except ValueError:
+        try:
+            normalized = candidate.encode("idna").decode("ascii")
+        except UnicodeError as exc:
+            raise ValueError(f"Invalid hostname: {value}") from exc
+        if len(normalized) > 253 or not all(
+            re.fullmatch(r"[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?", label)
+            for label in normalized.split(".")
+        ):
+            raise ValueError(f"Invalid hostname: {value}")
+
+    return f"*.{normalized}" if wildcard else normalized
+
+
+def _parse_allowed_url_hosts(value: str) -> frozenset[str]:
+    hosts: set[str] = set()
+    for line in value.splitlines():
+        candidate = line.strip()
+        if not candidate:
+            continue
+        hosts.add(_normalize_allowed_url_host(candidate))
+    return frozenset(hosts)
+
+
+def _host_matches_rule(hostname: str, rule: str) -> bool:
+    if rule.startswith("*."):
+        suffix = rule[1:]
+        return hostname.endswith(suffix) and hostname != rule[2:]
+    return hostname == rule
+
+
+def _load_allowed_url_hosts() -> frozenset[str]:
+    path = _settings_path()
+    if not path.exists():
+        return frozenset(DEFAULT_ALLOWED_DROP_URL_HOSTS)
+    try:
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        if not isinstance(payload, dict):
+            raise ValueError("settings root is not an object")
+        values = payload.get("allowed_image_hosts")
+        if not isinstance(values, list) or not all(
+            isinstance(item, str) for item in values
+        ):
+            raise ValueError("allowed_image_hosts is not a string list")
+        return _parse_allowed_url_hosts("\n".join(values))
+    except (OSError, ValueError, json.JSONDecodeError):
+        return frozenset(DEFAULT_ALLOWED_DROP_URL_HOSTS)
+
+
+def _save_allowed_url_hosts(hosts: frozenset[str]) -> None:
+    path = _settings_path()
+    path.parent.mkdir(parents=True, exist_ok=True)
+    temporary_path = path.with_name(path.name + ".tmp")
+    payload = {"allowed_image_hosts": sorted(hosts)}
+    try:
+        temporary_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        temporary_path.replace(path)
+    except OSError:
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
 def _load_recent_paths() -> list[Path]:
     path = _recent_cache_path()
     if not path.exists():
@@ -1326,7 +1605,26 @@ def _save_recent_paths(paths: list[Path]) -> None:
     path = _recent_cache_path()
     path.parent.mkdir(parents=True, exist_ok=True)
     payload = [str(item) for item in paths[:MAX_RECENT_IMAGES]]
-    path.write_text(json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8")
+    temporary_path = path.with_name(path.name + ".tmp")
+    try:
+        temporary_path.write_text(
+            json.dumps(payload, ensure_ascii=False, indent=2), encoding="utf-8"
+        )
+        temporary_path.replace(path)
+    except OSError:
+        try:
+            temporary_path.unlink(missing_ok=True)
+        except OSError:
+            pass
+        raise
+
+
+def _is_app_cache_path(path: Path) -> bool:
+    candidate_parent = Path(path).resolve(strict=False).parent
+    return any(
+        candidate_parent == directory.resolve(strict=False)
+        for directory in (_app_cache_dir(), _legacy_cache_dir())
+    )
 
 
 def _clear_app_cache_files(include_legacy: bool = True) -> int:

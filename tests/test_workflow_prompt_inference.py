@@ -108,6 +108,36 @@ class WorkflowPromptInferenceTests(unittest.TestCase):
         self.assertEqual(guess.positive, "cat")
         self.assertIn("Sampler node: 1", guess.details)
 
+    def test_ui_auto_clip_trace_handles_cyclic_sampler_graph(self) -> None:
+        workflow = {
+            "nodes": [
+                {
+                    "id": 1,
+                    "type": "KSampler",
+                    "inputs": [
+                        {"name": "model", "link": 1},
+                        {"name": "positive", "link": 3},
+                    ],
+                },
+                {
+                    "id": 2,
+                    "type": "KSampler",
+                    "inputs": [{"name": "model", "link": 2}],
+                },
+                {"id": 3, "type": "CLIPTextEncode", "widgets_values": ["cat"]},
+            ],
+            "links": [
+                [1, 2, 0, 1, 0, "MODEL"],
+                [2, 1, 0, 2, 0, "MODEL"],
+                [3, 3, 0, 1, 1, "CONDITIONING"],
+            ],
+        }
+
+        guess = infer_workflow_prompts(json.dumps(workflow), "", "auto")
+
+        self.assertEqual(guess.positive, "cat")
+        self.assertIn("Sampler node: 1", guess.details)
+
     def test_auto_clip_trace_respects_context_output_index(self) -> None:
         prompt = {
             "6": {"class_type": "CLIPTextEncode", "inputs": {"text": "cat"}},

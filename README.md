@@ -46,14 +46,15 @@ ComfyUI, A1111/WebUI, NovelAI 이미지에 저장된 프롬프트와 생성 설�
 - `File` 메뉴에서 이미지 열기, 현재 탭 복사/저장, 앱 캐시 삭제를 실행할 수 있습니다.
 - `Recent images`에서 최근 파일을 다시 열 수 있으며 `View > Recent Images`로 목록 표시를 전환할 수 있습니다.
 - 최근 목록은 `%LOCALAPPDATA%\ComfyUI-EXIF-viewer\recent_images.json`에 저장됩니다.
+- `Settings > Allowed Image Sites...`에서 이미지 URL을 받을 HTTPS 호스트를 한 줄에 하나씩 추가할 수 있습니다. `*.example.com`은 해당 도메인의 모든 서브도메인을 허용합니다.
+- 허용 호스트 목록은 `%LOCALAPPDATA%\ComfyUI-EXIF-viewer\settings.json`에 저장되며, 기존 호환성을 위해 최초 기본값은 `ac-o.namu.la`입니다. 빈 목록으로 저장하면 URL 다운로드가 비활성화됩니다.
 - 클립보드 이미지와 허용된 HTTPS 이미지 URL의 다운로드 결과는 `%LOCALAPPDATA%\ComfyUI-EXIF-viewer\cache`에 저장됩니다.
 - `File > Clear Cache`는 앱이 만든 최근 목록과 다운로드 캐시만 지우며 로컬 원본 이미지는 삭제하지 않습니다.
-- URL 드롭은 현재 `https://ac-o.namu.la/...` 주소만 허용합니다.
 
 ## 보안과 개인정보
 
 - 이미지는 로컬에서 처리하며 앱 자체의 분석, 광고, 계정 또는 백그라운드 업데이트 확인은 없습니다.
-- URL 다운로드는 사용자가 직접 드롭하거나 붙여 넣은 `https://ac-o.namu.la/...` 이미지에만 실행되며 다른 호스트로 향하는 리디렉션은 거부합니다.
+- URL 다운로드는 사용자가 직접 드롭하거나 붙여 넣은 URL이 설정된 HTTPS 호스트와 일치할 때만 실행됩니다. 다운로드 중 허용 목록 밖의 호스트로 향하는 리디렉션은 거부합니다.
 - 이미지 파일은 512 MB, 압축 해제된 단일 메타데이터 항목은 16 MB로 제한합니다.
 - 공식 Windows 바이너리는 GitHub Releases에서만 배포하고 릴리스의 SHA-256과 대조합니다.
 - 저장 데이터와 네트워크 동작은 [PRIVACY.md](PRIVACY.md), 취약점 신고 절차는 [SECURITY.md](SECURITY.md)를 참고하세요.
