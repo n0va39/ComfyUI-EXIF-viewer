@@ -813,6 +813,18 @@ def extract_sections(result: MetadataResult) -> MetadataSections:
         negative_prompt = novel_negative or negative_prompt
         settings = novel_settings or settings
 
+    civitai_prompt = _first_value_from_source(result, "Civitai", "prompt")
+    civitai_negative = _first_value_from_source(
+        result, "Civitai", "negative_prompt"
+    )
+    civitai_settings = _first_value_from_source(result, "Civitai", "settings")
+    if civitai_prompt or civitai_negative:
+        if not parameters:
+            platform = "Civitai"
+        prompt = prompt or civitai_prompt
+        negative_prompt = negative_prompt or civitai_negative
+        settings = settings or civitai_settings
+
     generic_prompt = _first_value_from_source(result, "Generic", "prompt")
     generic_negative = _first_value_from_source(result, "Generic", "negative_prompt")
     if not prompt and generic_prompt:
